@@ -169,27 +169,29 @@ cat google_token.json | pbcopy
 
 No repositório: **Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret                    | Valor                              | Exemplo                    |
-| ------------------------- | ---------------------------------- | -------------------------- |
-| `JIRA_DOMAIN`             | Domínio do seu Jira (sem https://) | `suaempresa.atlassian.net` |
-| `JIRA_EMAIL`              | E-mail da sua conta Atlassian      | `voce@empresa.com`         |
-| `JIRA_API_TOKEN`          | Token gerado no passo 5            | `ATATxxxxxxxx`             |
-| `GOOGLE_CREDENTIALS_JSON` | Conteúdo do `google_token.json`    | `{"token": "...", ...}`    |
-| `TELEGRAM_BOT_TOKEN`      | Token do bot criado no passo 2     | `123456:ABCdef...`         |
-| `TELEGRAM_CHAT_ID`        | ID do seu chat com o bot           | `388676023`                |
+| Secret                    | Valor                                | Exemplo                    |
+| ------------------------- | ------------------------------------ | -------------------------- |
+| `JIRA_DOMAIN`             | Domínio do seu Jira (sem https://)   | `suaempresa.atlassian.net` |
+| `JIRA_EMAIL`              | E-mail da sua conta Atlassian        | `voce@empresa.com`         |
+| `JIRA_API_TOKEN`          | Token gerado no passo 5              | `ATATxxxxxxxx`             |
+| `GOOGLE_CREDENTIALS_JSON` | Conteúdo do `google_token.json`      | `{"token": "...", ...}`    |
+| `TELEGRAM_BOT_TOKEN`      | Token do bot criado no passo 2       | `123456:ABCdef...`         |
+| `TELEGRAM_CHAT_ID`        | ID do seu chat com o bot             | `388676023`                |
+| `START_DATE`              | Data de corte (formato `YYYY-MM-DD`) | `2026-07-01`               |
+| `LOOKBACK_DAYS`           | Dias para trás na busca              | `7`                        |
 
 ---
 
-### 7. Ajustar as variáveis no workflow
+### 7. Configurar variáveis de ambiente como Secrets
 
-Abra `.github/workflows/clockwork-agent.yml` e configure:
+`START_DATE` e `LOOKBACK_DAYS` também devem ser adicionados como Secrets no GitHub (junto com os demais), em **Settings → Secrets and variables → Actions → New repository secret**:
 
-```yaml
-START_DATE: "2026-07-01" # data de corte — eventos anteriores são ignorados
-LOOKBACK_DAYS: "7" # dias para trás (usado se START_DATE não estiver definido)
-```
+| Secret          | Valor recomendado | Descrição                                                                                                                  |
+| --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `START_DATE`    | `2026-07-01`      | Data de corte no formato `YYYY-MM-DD`. Eventos anteriores são ignorados. Defina como o dia em que começou a usar o agente. |
+| `LOOKBACK_DAYS` | `7`               | Quantos dias para trás buscar. Usado apenas quando `START_DATE` não está definido.                                         |
 
-> **Dica:** defina `START_DATE` como o dia em que começou a usar o agente. Isso garante que lançamentos manuais anteriores não sejam duplicados.
+> **Dica:** usando Secrets para essas variáveis, você consegue alterar a data de corte ou a janela de busca diretamente pelo GitHub, sem precisar editar e fazer push de código.
 
 ---
 
