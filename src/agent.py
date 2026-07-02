@@ -464,7 +464,11 @@ def main():
         raise
 
     # ── Execução das 18h: só lembrete ────────────────────────────────────────
-    if hour < 19:
+    force_mode = os.environ.get("FORCE_MODE", "").strip().lower()
+    is_reminder = hour < 19 and force_mode != "launch"
+    is_launch   = hour >= 19 or force_mode == "launch"
+
+    if is_reminder and not is_launch:
         log.info("Execução das 18h — enviando lembrete.")
         notify_reminder()
         return
