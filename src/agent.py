@@ -54,15 +54,18 @@ def build_calendar_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
-def get_todays_events(service) -> list[dict]:
-    """Retorna todos os eventos de hoje (meia-noite até agora em BRT)."""
+def get_recent_events(service) -> list[dict]:
+    """Retorna eventos dos últimos LOOKBACK_DAYS dias até agora (em BRT)."""
+    lookback  = int(os.environ.get("LOOKBACK_DAYS", "7"))
     now_brt   = datetime.now(BRT)
-    start_brt = now_brt.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_brt = (now_brt - timedelta(days=lookback)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
     time_min = start_brt.isoformat()
     time_max = now_brt.isoformat()
 
-    log.info("Buscando eventos de %s até %s", time_min, time_max)
+    log.info("Buscando eventos dos últimos %d dia(s): %s até %s", lookback, time_min, time_max)
 
     result = service.events().list(
         calendarId="primary",
@@ -183,8 +186,8 @@ def main():
 
     # 1. Buscar eventos do Calendar
     service = build_calendar_service()
-    events  = get_todays_events(service)
-    log.info("%d evento(s) encontrado(s) hoje.", len(events))
+    events  = get_recent_events(service)
+    log.info("%d evento(s) encontrado(s) no período.", len(events))
 
     # 2. Filtrar os que têm SCG
     parsed_events = [p for e in events if (p := parse_event(e)) is not None]
