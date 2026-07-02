@@ -37,35 +37,26 @@ BRT            = timezone(timedelta(hours=-3))
 TOLERANCE_S    = 300
 DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
 MAX_RETRIES    = 3
-RETRY_DELAYS   = [5, 10, 20]   # segundos entre tentativas
+RETRY_DELAYS   = [5, 10, 20]
 
 
 # ── Retry automático ───────────────────────────────────────────────────────────
 
 def requests_with_retry(method: str, url: str, max_retries: int = MAX_RETRIES, **kwargs) -> requests.Response:
-    """
-    Executa uma requisição HTTP com retry automático.
-    Tenta até max_retries vezes em caso de erro de conexão ou 5xx.
-    Erros 4xx (exceto 429) não são retentados — são erros do cliente.
-    """
     for attempt in range(max_retries):
         try:
             resp = requests.request(method, url, **kwargs)
 
-            # 429 Too Many Requests — espera e tenta de novo
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", RETRY_DELAYS[attempt]))
-                log.warning("Rate limit (429) — aguardando %ds antes de tentar novamente (tentativa %d/%d)",
-                            wait, attempt + 1, max_retries)
+                log.warning("Rate limit (429) — aguardando %ds (tentativa %d/%d)", wait, attempt + 1, max_retries)
                 time.sleep(wait)
                 continue
 
-            # 5xx — erro do servidor, pode ser transitório
             if resp.status_code >= 500:
                 if attempt < max_retries - 1:
                     delay = RETRY_DELAYS[attempt]
-                    log.warning("Erro %s — aguardando %ds antes de tentar novamente (tentativa %d/%d)",
-                                resp.status_code, delay, attempt + 1, max_retries)
+                    log.warning("Erro %s — aguardando %ds (tentativa %d/%d)", resp.status_code, delay, attempt + 1, max_retries)
                     time.sleep(delay)
                     continue
 
@@ -74,8 +65,7 @@ def requests_with_retry(method: str, url: str, max_retries: int = MAX_RETRIES, *
         except (requests.ConnectionError, requests.Timeout) as e:
             if attempt < max_retries - 1:
                 delay = RETRY_DELAYS[attempt]
-                log.warning("Erro de conexão: %s — aguardando %ds (tentativa %d/%d)",
-                            e, delay, attempt + 1, max_retries)
+                log.warning("Erro de conexão: %s — aguardando %ds (tentativa %d/%d)", e, delay, attempt + 1, max_retries)
                 time.sleep(delay)
             else:
                 log.error("Todas as %d tentativas falharam: %s", max_retries, e)
@@ -87,21 +77,84 @@ def requests_with_retry(method: str, url: str, max_retries: int = MAX_RETRIES, *
 # ── Health check ───────────────────────────────────────────────────────────────
 
 def save_health(status: str, launched: int = 0, error: str = ""):
-    """Salva o health.json com o resultado da última execução."""
     data = {
-        "last_run":         datetime.now(BRT).strftime("%Y-%m-%dT%H:%M:%S"),
-        "status":           status,          # "ok" | "error"
+        "last_run":          datetime.now(BRT).strftime("%Y-%m-%dT%H:%M:%S"),
+        "status":            status,
         "worklogs_launched": launched,
-        "error":            error,
+        "error":             error,
     }
     HEALTH_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     log.info("Health check salvo: status=%s worklogs=%d", status, launched)
 
 
+# ── Verificação preventiva de tokens ──────────────────────────────────────────
+
+def check_jira_token(domain: str) -> bool:
+    """
+    Verifica se o token do Jira está válido chamando /myself.
+    Retorna True se ok, False se inválido — e manda alerta no Telegram.
+    """
+    url = f"https://{domain}/rest/api/3/myself"
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            display_name = resp.json().get("displayName", "")
+            log.info("✅ Token Jira válido — usuário: %s", display_name)
+            return True
+        elif resp.status_code == 401:
+            log.error("❌ Token Jira inválido ou expirado (401)")
+            send_telegram_alert(
+                "🔑 <b>Clockwork Agent — Token Jira Inválido</b>\n\n"
+                "O token de API do Jira está inválido ou foi revogado.\n\n"
+                "Gere um novo em:\n"
+                "<code>id.atlassian.com → Security → API tokens</code>\n\n"
+                "Atualize o Secret <code>JIRA_API_TOKEN</code> no GitHub."
+            )
+            return False
+        else:
+            log.warning("Verificação do token Jira retornou %s", resp.status_code)
+            return True  # não bloqueia por erros inesperados
+    except Exception as e:
+        log.warning("Erro ao verificar token Jira: %s", e)
+        return True  # não bloqueia em caso de falha de rede
+
+
+def check_google_token(creds: Credentials) -> bool:
+    """
+    Verifica se as credenciais do Google ainda são válidas.
+    Tenta renovar o access_token — alerta se o refresh_token foi revogado.
+    Retorna True se ok, False se inválido.
+    """
+    try:
+        if creds.expired or not creds.token:
+            creds.refresh(Request())
+        log.info("✅ Token Google Calendar válido")
+        return True
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "invalid_grant" in error_msg or "token has been expired or revoked" in error_msg:
+            log.error("❌ Token Google revogado: %s", e)
+            send_telegram_alert(
+                "🔑 <b>Clockwork Agent — Token Google Revogado</b>\n\n"
+                "O token do Google Calendar foi revogado ou expirou.\n\n"
+                "Para corrigir:\n"
+                "1. Execute <code>python gerar_token_google.py</code> no seu PC\n"
+                "2. Atualize o Secret <code>GOOGLE_CREDENTIALS_JSON</code> no GitHub\n\n"
+                "O agente ficará inativo até a correção."
+            )
+            return False
+        else:
+            log.warning("Erro ao verificar token Google: %s", e)
+            return True  # não bloqueia por erros inesperados
+
+
 # ── Google Chat ────────────────────────────────────────────────────────────────
 
 def send_google_chat(text: str):
-    """Envia mensagem via Google Chat Webhook. Falha silenciosa."""
     webhook_url = os.environ.get("GOOGLE_CHAT_WEBHOOK", "")
     if not webhook_url:
         return
@@ -119,7 +172,6 @@ def send_google_chat(text: str):
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def send_telegram(text: str):
-    """Envia mensagem via Telegram e Google Chat. Falha silenciosa."""
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
@@ -140,7 +192,6 @@ def send_telegram(text: str):
 
 
 def send_telegram_alert(text: str):
-    """Envia alerta de falha via Telegram e Google Chat."""
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if token and chat_id:
@@ -169,7 +220,6 @@ def format_seconds(seconds: int) -> str:
 # ── Notificações ───────────────────────────────────────────────────────────────
 
 def notify_reminder():
-    """Lembrete das 18h para lançar eventos no Calendar."""
     now_brt = datetime.now(BRT).strftime("%d/%m/%Y")
     send_telegram(
         f"🔔 <b>Lembrete — {now_brt}</b>\n\n"
@@ -180,7 +230,6 @@ def notify_reminder():
 
 
 def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], missing_seconds: int):
-    """Notificação das 20h com resumo do lançamento e horas faltantes."""
     now_brt = datetime.now(BRT).strftime("%d/%m/%Y %H:%M")
     lines   = [f"⏱ <b>Clockwork Agent</b> — {now_brt}\n"]
 
@@ -217,7 +266,6 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
 
 
 def notify_weekly(weekly_logs: list[dict]):
-    """Relatório semanal toda sexta-feira às 20h."""
     now_brt    = datetime.now(BRT)
     start_week = (now_brt - timedelta(days=4)).strftime("%d/%m")
     end_week   = now_brt.strftime("%d/%m")
@@ -314,7 +362,6 @@ def jira_auth_header() -> str:
 
 
 def get_jira_worklogs_by_date(domain: str, date: str) -> int:
-    """Busca via JQL todos os worklogs do usuário numa data. Retorna total em segundos."""
     jql        = f'worklogAuthor = currentUser() AND worklogDate = "{date}"'
     search_url = f"https://{domain}/rest/api/3/search/jql"
     issue_keys = []
@@ -367,7 +414,6 @@ def get_jira_worklogs_by_date(domain: str, date: str) -> int:
 
 
 def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
-    """Busca TODOS os worklogs do usuário no mês via JQL."""
     _, last_d  = calendar.monthrange(year, month)
     date_start = f"{year}-{month:02d}-01"
     date_end   = f"{year}-{month:02d}-{last_d:02d}"
@@ -430,7 +476,6 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
 
 
 def notify_monthly(domain: str, year: int, month: int):
-    """Envia relatório mensal."""
     month_name = [
         "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
         "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -485,7 +530,7 @@ def build_calendar_service():
     if creds.expired or not creds.token:
         creds.refresh(Request())
 
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False), creds
 
 
 def get_recent_events(service) -> list[dict]:
@@ -723,14 +768,24 @@ def main():
 
     log.info("=== Jira Clockwork Agent iniciado === (hora BRT: %d)", hour)
 
+    # ── Constrói serviço Google Calendar e obtém credenciais ─────────────────
     try:
-        service = build_calendar_service()
+        service, creds = build_calendar_service()
     except Exception as e:
         msg = (f"🚨 <b>Clockwork Agent — ERRO CRÍTICO</b>\n\n"
                f"Falha ao conectar com Google Calendar:\n<code>{e}</code>")
         send_telegram_alert(msg)
         save_health("error", error=str(e))
         raise
+
+    # ── Verificação preventiva de tokens ─────────────────────────────────────
+    log.info("Verificando tokens...")
+    google_ok = check_google_token(creds)
+    jira_ok   = check_jira_token(domain)
+
+    if not google_ok or not jira_ok:
+        save_health("error", error="Token inválido detectado na verificação preventiva")
+        return   # interrompe sem lançar exceção — alerta já foi enviado
 
     # ── Execução das 18h: só lembrete ────────────────────────────────────────
     force_mode  = os.environ.get("FORCE_MODE", "").strip().lower()
@@ -835,7 +890,6 @@ def main():
             log.info("Gerando relatório mensal...")
             notify_monthly(domain, now_brt.year, now_brt.month)
 
-        # Health check — salva status de sucesso
         save_health("ok", launched=len(launched))
 
         log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
