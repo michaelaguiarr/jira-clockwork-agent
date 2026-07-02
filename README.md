@@ -2,7 +2,7 @@
 
 Agente que lê automaticamente seus eventos do **Google Calendar** e lança os worklogs no **Jira** (sincronizado com o **Clockwork Pro**), sem você precisar fazer nada.
 
-Ao final de cada execução, você recebe notificações no **Telegram** e no **Google Chat** com o resumo do que foi lançado. Toda sexta-feira às 20h recebe o **relatório semanal**, e no último dia útil do mês o **relatório mensal** com meta x realizado.
+Ao final de cada execução, você recebe notificações no **Telegram** e no **Google Chat** com o resumo do que foi lançado. Toda sexta-feira às 23h30 recebe o **relatório semanal**, e no último dia útil do mês o **relatório mensal** com meta x realizado.
 
 > Criado para o time de Sustentação da RPE Processadora — mas funciona para qualquer equipe que use Jira + Clockwork Pro + Google Calendar.
 
@@ -11,14 +11,14 @@ Ao final de cada execução, você recebe notificações no **Telegram** e no **
 ## Como funciona
 
 ```
-GitHub Actions (18h e 20h, seg–sex)
+GitHub Actions (18h e 23h30, seg–sex)
   ↓
 Verificação preventiva de tokens (Google + Jira)
   → alerta imediato se algum token estiver inválido
   ↓
 18h → Lembrete no Telegram/Google Chat para lançar eventos no Calendar
   ↓
-20h → Google Calendar API
+23h30 → Google Calendar API
         → busca eventos do período configurado
         → filtra os que têm PROJ-XXXX no título (SCG-1234, CARDS-567, etc.)
       Jira API
@@ -63,13 +63,13 @@ O comentário do worklog no Jira será o título do evento **sem o prefixo `PROJ
 
 Não esqueça de lançar seus eventos no Google Calendar com o código do ticket!
 Exemplo: SCG-2098 - [JETCARD] Setup Noname
-⏰ Os worklogs serão lançados automaticamente às 20h.
+⏰ Os worklogs serão lançados automaticamente às 23h30.
 ```
 
-**Execução diária (20h):**
+**Execução diária (23h30):**
 
 ```
-⏱ Clockwork Agent — 02/07/2026 20:00
+⏱ Clockwork Agent — 02/07/2026 23:30
 
 ✅ Lançados:
   • SCG-2098  |  1h00  |  [JETCARD] Setup Noname
@@ -94,7 +94,7 @@ id.atlassian.com → Security → API tokens
 Atualize o Secret JIRA_API_TOKEN no GitHub.
 ```
 
-**Relatório semanal (toda sexta às 20h):**
+**Relatório semanal (toda sexta às 23h30):**
 
 ```
 📊 Resumo semanal — 30/06 a 04/07
@@ -108,7 +108,7 @@ Atualize o Secret JIRA_API_TOKEN no GitHub.
 🎯 Meta semanal atingida!
 ```
 
-**Relatório mensal (último dia útil do mês às 20h):**
+**Relatório mensal (último dia útil do mês às 23h30):**
 
 ```
 📅 Relatório Mensal — Julho/2026
@@ -284,7 +284,7 @@ Para testar o fluxo completo de lançamento fora do horário, defina `FORCE_MODE
 Exemplo de log esperado:
 
 ```
-=== Jira Clockwork Agent iniciado === (hora BRT: 20)
+=== Jira Clockwork Agent iniciado === (hora BRT: 23)
 Verificando tokens...
 ✅ Token Google Calendar válido
 ✅ Token Jira válido — usuário: michael.aguiar
@@ -315,7 +315,7 @@ O agente tem **duas camadas** de proteção:
 
 ## Verificação preventiva de tokens
 
-No início de **cada execução** (18h e 20h), o agente verifica se os tokens do Google e do Jira ainda são válidos — antes de tentar qualquer operação.
+No início de **cada execução** (18h e 23h30), o agente verifica se os tokens do Google e do Jira ainda são válidos — antes de tentar qualquer operação.
 
 | Token               | O que verifica                                     | Alerta enviado quando                                                          |
 | ------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -385,7 +385,7 @@ O agente roda automaticamente **de segunda a sexta**:
 | Lembrete   | 18:00       | 21:00       | Verifica tokens + notifica para lançar eventos no Calendar      |
 | Lançamento | 20:00       | 23:00       | Verifica tokens + lança worklogs + horas faltantes + relatórios |
 
-> ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então os horários passam a ser 19h e 21h BRT. Ajuste os crons para `"0 22 * * 1-5"` e `"0 00 * * 1-5"` se quiser manter os horários fixos.
+> ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então os horários passam a ser 19h e 00h30 BRT. Ajuste os crons para `"0 22 * * 1-5"` e `"30 3 * * 2-6"` se quiser manter os horários fixos.
 
 ---
 
