@@ -251,16 +251,34 @@ def is_last_working_day_of_month(dt: datetime) -> bool:
 
 # ── Relatório mensal ───────────────────────────────────────────────────────────
 
-def get_monthly_worklogs(domain: str, year: int, month: int, logged: dict) -> list[dict]:
+def get_monthly_worklogs(domain: str, year: int, month: int, service) -> list[dict]:
     """
-    Busca worklogs lançados pelo agente no mês via Jira API.
-    Filtra pelos event_ids registrados no logged_worklogs.json.
+    Busca worklogs do mês via Jira API.
+    Coleta os issue_keys dos eventos do Calendar no mês para saber quais tickets consultar.
     """
-    # Monta set de issue_keys que temos no controle local
+    import calendar as cal_mod
+    now_brt   = datetime.now(BRT)
+    _, last_d = cal_mod.monthrange(year, month)
+    start_brt = datetime(year, month, 1, tzinfo=BRT)
+    end_brt   = datetime(year, month, last_d, 23, 59, 59, tzinfo=BRT)
+    # Não busca além de hoje
+    if end_brt > now_brt:
+        end_brt = now_brt
+
+    # Busca eventos do mês no Calendar para extrair os issue_keys
+    result_cal = service.events().list(
+        calendarId="primary",
+        timeMin=start_brt.isoformat(),
+        timeMax=end_brt.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
     issue_keys = set()
-    for wl_ref in logged.values():
-        if wl_ref and ":" in str(wl_ref):
-            issue_keys.add(wl_ref.split(":")[0])
+    for event in result_cal.get("items", []):
+        parsed = parse_event(event)
+        if parsed:
+            issue_keys.add(parsed["issue_key"])
 
     month_str = f"{year}-{month:02d}"
     result    = []
@@ -288,7 +306,7 @@ def get_monthly_worklogs(domain: str, year: int, month: int, logged: dict) -> li
     return result
 
 
-def notify_monthly(domain: str, logged: dict, year: int, month: int):
+def notify_monthly(domain: str, year: int, month: int, service):
     """Envia relatório mensal no Telegram."""
     month_name = [
         "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -297,7 +315,7 @@ def notify_monthly(domain: str, logged: dict, year: int, month: int):
 
     working_days = count_working_days(year, month)
     goal_s       = working_days * DAILY_GOAL_S
-    worklogs     = get_monthly_worklogs(domain, year, month, logged)
+    worklogs     = get_monthly_worklogs(domain, year, month, service)
 
     # Agrupa por ticket
     by_ticket: dict[str, int] = {}
@@ -742,7 +760,7 @@ def main():
         force_monthly = os.environ.get("FORCE_MONTHLY", "").strip().lower() == "true"
         if is_last_working_day_of_month(now_brt) or force_monthly:
             log.info("Gerando relatório mensal...")
-            notify_monthly(domain, new_logged, now_brt.year, now_brt.month)
+            notify_monthly(domain, now_brt.year, now_brt.month, service)
 
         log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
 
