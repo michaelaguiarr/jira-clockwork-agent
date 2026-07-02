@@ -220,7 +220,22 @@ cat google_token.json | pbcopy
 
 ---
 
-### 7. Configurar Secrets no GitHub
+### 7. Criar Personal Access Token (PAT) do GitHub
+
+O agente precisa de um PAT para commitar o `logged_worklogs.json` e `health.json` na branch `main` protegida.
+
+1. Acesse [github.com/settings/tokens](https://github.com/settings/tokens)
+2. Clique em **Generate new token (classic)**
+3. Dê um nome (ex: `clockwork-agent-push`)
+4. Expiration: **No expiration**
+5. Marque o escopo: ✅ **repo**
+6. Clique em **Generate token** e copie o token gerado
+
+> ⚠️ Guarde o token gerado — ele só é exibido uma vez.
+
+---
+
+### 8. Configurar Secrets no GitHub
 
 No repositório: **Settings → Secrets and variables → Actions → New repository secret**
 
@@ -233,6 +248,7 @@ No repositório: **Settings → Secrets and variables → Actions → New reposi
 | `TELEGRAM_BOT_TOKEN`      | Token do bot criado no passo 2                      | `123456:ABCdef...`                |
 | `TELEGRAM_CHAT_ID`        | ID do seu chat com o bot                            | `388676023`                       |
 | `GOOGLE_CHAT_WEBHOOK`     | URL do webhook do Google Chat (opcional)            | `https://chat.googleapis.com/...` |
+| `GH_PAT`                  | Personal Access Token gerado no passo 7             | `ghp_xxxxxxxx`                    |
 | `START_DATE`              | Data de corte — eventos anteriores são ignorados    | `2026-07-01`                      |
 | `LOOKBACK_DAYS`           | Dias para trás na busca (usado se START_DATE vazio) | `7`                               |
 | `DAILY_HOURS_GOAL`        | Meta diária de horas                                | `8`                               |
@@ -245,7 +261,21 @@ No repositório: **Settings → Secrets and variables → Actions → New reposi
 
 ---
 
-### 8. Testar manualmente
+### 9. Proteger a branch main (opcional)
+
+Para impedir que colaboradores façam push direto na main:
+
+1. Vá em **Settings → Branches → Add classic branch protection rule**
+2. **Branch name pattern:** `main`
+3. Marque ✅ **Require a pull request before merging**
+4. **Não marque** ❌ **Do not allow bypassing the above settings** — deixe desmarcado para você (admin) e o Actions continuarem com acesso
+5. Clique em **Create**
+
+> O `GH_PAT` configurado no passo anterior garante que o GitHub Actions consegue commitar mesmo com a branch protegida.
+
+---
+
+### 10. Testar manualmente
 
 No GitHub: **Actions → Clockwork Agent → Run workflow**
 
@@ -402,6 +432,9 @@ A meta considera apenas dias úteis do mês, excluindo finais de semana e feriad
 
 **As horas faltantes consideram lançamentos manuais?**
 Sim! As horas faltantes são calculadas via JQL diretamente no Jira, buscando tudo que o usuário lançou no dia — independente de ser via agente, manual ou sem evento no Calendar.
+
+**Por que preciso do GH_PAT?**
+O GitHub Actions usa por padrão o `GITHUB_TOKEN` que não consegue fazer push em branches protegidas. O PAT (Personal Access Token) é gerado com suas credenciais de admin, permitindo que o agente commite o `logged_worklogs.json` e `health.json` mesmo com a proteção ativa.
 
 ---
 
