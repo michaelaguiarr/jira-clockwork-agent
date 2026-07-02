@@ -2,7 +2,7 @@
 
 Agente que lê automaticamente seus eventos do **Google Calendar** e lança os worklogs no **Jira** (sincronizado com o **Clockwork Pro**), sem você precisar fazer nada.
 
-Ao final de cada execução, você recebe uma notificação no **Telegram** com o resumo do que foi lançado. Toda sexta-feira às 18h, recebe também o **relatório semanal** consolidado.
+Ao final de cada execução, você recebe notificações no **Telegram** e no **Google Chat** com o resumo do que foi lançado. Toda sexta-feira às 20h recebe o **relatório semanal**, e no último dia útil do mês o **relatório mensal** com meta x realizado.
 
 > Criado para o time de Sustentação da RPE Processadora — mas funciona para qualquer equipe que use Jira + Clockwork Pro + Google Calendar.
 
@@ -11,50 +11,62 @@ Ao final de cada execução, você recebe uma notificação no **Telegram** com 
 ## Como funciona
 
 ```
-GitHub Actions (12h e 18h, seg–sex)
+GitHub Actions (18h e 20h, seg–sex)
   ↓
-Google Calendar API
-  → busca eventos do período configurado
-  → filtra os que têm SCG-XXXX no título
+18h → Lembrete no Telegram/Google Chat para lançar eventos no Calendar
   ↓
-Jira API
-  → verifica se já existe worklog no ticket (evita duplicar lançamentos manuais)
-  → lança worklog com a duração exata do evento
-  ↓
-Telegram
-  → notificação com resumo da execução
-  → relatório semanal toda sexta às 18h
-  ↓
-logged_worklogs.json
-  → registra os eventos já processados (evita lançar duas vezes)
+20h → Google Calendar API
+        → busca eventos do período configurado
+        → filtra os que têm PROJ-XXXX no título (SCG-1234, CARDS-567, etc.)
+      Jira API
+        → verifica se já existe worklog no ticket (evita duplicar lançamentos manuais)
+        → lança worklog com a duração exata do evento
+        → retry automático (até 3x) em caso de falha transitória
+      Telegram + Google Chat
+        → notificação diária com worklogs lançados e horas faltantes
+        → relatório semanal toda sexta às 20h
+        → relatório mensal no último dia útil do mês
+      logged_worklogs.json + health.json
+        → controle de eventos processados e status da última execução
 ```
 
 ---
 
 ## Convenção dos eventos no Calendar
 
-O título do evento deve conter o código do ticket (`SCG-XXXX`) em qualquer posição:
+O título do evento deve conter o código do ticket em qualquer posição. Qualquer padrão `PROJ-XXXX` é reconhecido automaticamente:
 
 ```
 ✅ SCG-2098 - [JETCARD] - Setup Noname
-✅ SCG-1957 - Avenida PCJ Refinanciamento
+✅ CARDS-567 - Investigação bug pagamento
 ✅ [REUNIÃO] SCG-2050 - Alinhamento time
-❌ Daily Sustentação          ← sem SCG, será ignorado
-❌ Almoço                     ← sem SCG, será ignorado
+✅ HPAY-890 - Correção HP Vencimento
+❌ Daily Sustentação          ← sem ticket, será ignorado
+❌ Almoço                     ← sem ticket, será ignorado
 ```
 
-O comentário do worklog no Jira será o título do evento **sem o prefixo `SCG-XXXX -`**.
+O comentário do worklog no Jira será o título do evento **sem o prefixo `PROJ-XXXX -`**.
 
 > ⚠️ Eventos de **dia inteiro** são ignorados. Apenas eventos com horário definido (início e fim) são processados.
 
 ---
 
-## Notificações no Telegram
+## Notificações
 
-**Execução diária** (12h e 18h):
+**Lembrete diário (18h):**
 
 ```
-⏱ Clockwork Agent — 02/07/2026 18:00
+🔔 Lembrete — 02/07/2026
+
+Não esqueça de lançar seus eventos no Google Calendar com o código do ticket!
+Exemplo: SCG-2098 - [JETCARD] Setup Noname
+⏰ Os worklogs serão lançados automaticamente às 20h.
+```
+
+**Execução diária (20h):**
+
+```
+⏱ Clockwork Agent — 02/07/2026 20:00
 
 ✅ Lançados:
   • SCG-2098  |  1h00  |  [JETCARD] Setup Noname
@@ -62,20 +74,36 @@ O comentário do worklog no Jira será o título do evento **sem o prefixo `SCG-
 ⏭ Já existiam no Jira:
   • SCG-1349  |  2026-07-02
 
-⏱ Total lançado: 1h00
+⏱ Total lançado hoje: 1h00
+⚠️ Horas faltantes: 2h00 para atingir a meta de 8h
 ```
 
-**Relatório semanal** (toda sexta às 18h):
+**Relatório semanal (toda sexta às 20h):**
 
 ```
 📊 Resumo semanal — 30/06 a 04/07
 
-✅ SCG-2098  |  3h00  |  [JETCARD] Setup Noname
-✅ SCG-1957  |  1h30  |  Avenida PCJ Refinanciamento
-✅ SCG-2050  |  2h00  |  Alinhamento time
+✅ SCG-2098  |  16h00
+✅ SCG-1957  |  8h00
+✅ CARDS-567  |  16h00
 
-⏱ Total semana: 6h30
-📅 Dias com lançamento: 3 de 5
+⏱ Total semana: 40h00
+📅 Dias com lançamento: 5 de 5
+🎯 Meta semanal atingida!
+```
+
+**Relatório mensal (último dia útil do mês às 20h):**
+
+```
+📅 Relatório Mensal — Julho/2026
+
+Meta: 184.00h  |  Reg: 180.50h  |  Dif: -3.50h ⚠️
+📆 Dias úteis: 23
+
+📋 Por ticket:
+  • SCG-2098  |  80h
+  • CARDS-567  |  60h
+  • SCG-1957  |  40h30m
 ```
 
 ---
@@ -100,14 +128,14 @@ Crie um repositório **privado** no GitHub e suba este projeto.
 
 **Pegar o Chat ID:**
 
-1. Mande qualquer mensagem para o seu bot recém-criado no Telegram
+1. Mande qualquer mensagem para o bot recém-criado no Telegram
 2. Acesse no browser (substituindo `SEU_TOKEN` pelo token recebido):
 
 ```
 https://api.telegram.org/botSEU_TOKEN/getUpdates
 ```
 
-3. No JSON retornado, copie o número do campo `"id"` dentro de `"chat"`:
+3. Copie o número do campo `"id"` dentro de `"chat"`:
 
 ```json
 "chat": { "id": 123456789, ... }
@@ -115,7 +143,18 @@ https://api.telegram.org/botSEU_TOKEN/getUpdates
 
 ---
 
-### 3. Ativar a Google Calendar API
+### 3. Configurar o Google Chat (opcional)
+
+Todas as notificações são espelhadas automaticamente no Google Chat via Webhook.
+
+1. Abra o espaço (room) no Google Chat onde quer receber as notificações
+2. Clique no nome do espaço → **Apps & integrations → Add webhooks**
+3. Dê um nome (ex: `Clockwork Agent`) → **Save**
+4. Copie a URL gerada e adicione como Secret `GOOGLE_CHAT_WEBHOOK`
+
+---
+
+### 4. Ativar a Google Calendar API
 
 1. Acesse [console.cloud.google.com](https://console.cloud.google.com)
 2. Crie um projeto (ex: `clockwork-agent`)
@@ -129,7 +168,7 @@ https://api.telegram.org/botSEU_TOKEN/getUpdates
 
 ---
 
-### 4. Gerar o token OAuth do Google (uma vez no seu PC)
+### 5. Gerar o token OAuth do Google (uma vez no seu PC)
 
 Com o `credentials.json` na raiz do projeto:
 
@@ -157,7 +196,7 @@ cat google_token.json | pbcopy
 
 ---
 
-### 5. Criar token de API do Jira
+### 6. Criar token de API do Jira
 
 1. Acesse [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
 2. Clique em **Create API token**
@@ -165,33 +204,26 @@ cat google_token.json | pbcopy
 
 ---
 
-### 6. Configurar Secrets no GitHub
+### 7. Configurar Secrets no GitHub
 
 No repositório: **Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret                    | Valor                                | Exemplo                    |
-| ------------------------- | ------------------------------------ | -------------------------- |
-| `JIRA_DOMAIN`             | Domínio do seu Jira (sem https://)   | `suaempresa.atlassian.net` |
-| `JIRA_EMAIL`              | E-mail da sua conta Atlassian        | `voce@empresa.com`         |
-| `JIRA_API_TOKEN`          | Token gerado no passo 5              | `ATATxxxxxxxx`             |
-| `GOOGLE_CREDENTIALS_JSON` | Conteúdo do `google_token.json`      | `{"token": "...", ...}`    |
-| `TELEGRAM_BOT_TOKEN`      | Token do bot criado no passo 2       | `123456:ABCdef...`         |
-| `TELEGRAM_CHAT_ID`        | ID do seu chat com o bot             | `388676023`                |
-| `START_DATE`              | Data de corte (formato `YYYY-MM-DD`) | `2026-07-01`               |
-| `LOOKBACK_DAYS`           | Dias para trás na busca              | `7`                        |
+| Secret                    | Valor                                               | Exemplo                           |
+| ------------------------- | --------------------------------------------------- | --------------------------------- |
+| `JIRA_DOMAIN`             | Domínio do seu Jira (sem https://)                  | `suaempresa.atlassian.net`        |
+| `JIRA_EMAIL`              | E-mail da sua conta Atlassian                       | `voce@empresa.com`                |
+| `JIRA_API_TOKEN`          | Token gerado no passo 6                             | `ATATxxxxxxxx`                    |
+| `GOOGLE_CREDENTIALS_JSON` | Conteúdo do `google_token.json`                     | `{"token": "...", ...}`           |
+| `TELEGRAM_BOT_TOKEN`      | Token do bot criado no passo 2                      | `123456:ABCdef...`                |
+| `TELEGRAM_CHAT_ID`        | ID do seu chat com o bot                            | `388676023`                       |
+| `GOOGLE_CHAT_WEBHOOK`     | URL do webhook do Google Chat (opcional)            | `https://chat.googleapis.com/...` |
+| `START_DATE`              | Data de corte — eventos anteriores são ignorados    | `2026-07-01`                      |
+| `LOOKBACK_DAYS`           | Dias para trás na busca (usado se START_DATE vazio) | `7`                               |
+| `DAILY_HOURS_GOAL`        | Meta diária de horas                                | `8`                               |
+| `FORCE_MODE`              | `launch` para forçar lançamento fora do horário     | _(vazio)_                         |
+| `FORCE_MONTHLY`           | `true` para forçar relatório mensal                 | _(vazio)_                         |
 
----
-
-### 7. Configurar variáveis de ambiente como Secrets
-
-`START_DATE` e `LOOKBACK_DAYS` também devem ser adicionados como Secrets no GitHub (junto com os demais), em **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret          | Valor recomendado | Descrição                                                                                                                  |
-| --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `START_DATE`    | `2026-07-01`      | Data de corte no formato `YYYY-MM-DD`. Eventos anteriores são ignorados. Defina como o dia em que começou a usar o agente. |
-| `LOOKBACK_DAYS` | `7`               | Quantos dias para trás buscar. Usado apenas quando `START_DATE` não está definido.                                         |
-
-> **Dica:** usando Secrets para essas variáveis, você consegue alterar a data de corte ou a janela de busca diretamente pelo GitHub, sem precisar editar e fazer push de código.
+> **Dica:** `START_DATE` deve ser o dia em que você começou a usar o agente, para evitar duplicar lançamentos manuais anteriores.
 
 ---
 
@@ -199,19 +231,21 @@ No repositório: **Settings → Secrets and variables → Actions → New reposi
 
 No GitHub: **Actions → Clockwork Agent → Run workflow**
 
-Verifique o log do step **"Rodar agente"** e confira se chegou mensagem no Telegram.
+Para testar o fluxo completo de lançamento fora do horário, defina `FORCE_MODE=launch` temporariamente e volte para vazio após o teste.
 
 Exemplo de log esperado:
 
 ```
-=== Jira Clockwork Agent iniciado ===
+=== Jira Clockwork Agent iniciado === (hora BRT: 20)
 Data de corte (START_DATE): 2026-07-01
-Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T18:00:00-03:00
+Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T20:00:00-03:00
 7 evento(s) encontrado(s) no período.
-3 evento(s) com SCG no título.
+3 evento(s) com ticket no título.
 ⏭️  Já lançado pelo agente: SCG-2098 (abc12345)
 ⚠️  Worklog já existe no Jira: SCG-1957 | 2026-07-01 | 5400s
 ✅ Worklog lançado: SCG-2050 | 3600s | 'Alinhamento time'
+Total lançado no Jira em 2026-07-02: 21600s (6h)
+Health check salvo: status=ok worklogs=1
 === Concluído: 1 worklog(s) lançado(s) ===
 ```
 
@@ -221,36 +255,62 @@ Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T18:00:00-03:00
 
 O agente tem **duas camadas** de proteção:
 
-| Camada                             | Como funciona                                                                                                                                                                                                                              |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Local** (`logged_worklogs.json`) | Registra o ID de cada evento do Calendar já processado. Se o agente já lançou, não lança de novo e não notifica.                                                                                                                           |
-| **Jira** (API)                     | Antes de lançar, consulta os worklogs existentes no ticket. Se já há um worklog no mesmo dia com duração parecida (±5 min), pula — mesmo que tenha sido lançado manualmente. Esses são notificados no Telegram como "Já existiam no Jira". |
+| Camada                             | Como funciona                                                                                                                                                                |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local** (`logged_worklogs.json`) | Registra o ID de cada evento do Calendar já processado. Se o agente já lançou, não lança de novo e não notifica.                                                             |
+| **Jira** (API)                     | Antes de lançar, consulta os worklogs existentes no ticket. Se já há um worklog no mesmo dia com duração parecida (±5 min), pula — mesmo que tenha sido lançado manualmente. |
 
 ---
 
-## Configurações disponíveis
+## Retry automático
 
-Todas configuradas diretamente no `.github/workflows/clockwork-agent.yml`:
+Em caso de falha transitória na API do Jira (timeout, erro 5xx, rate limit), o agente tenta automaticamente até **3 vezes** antes de desistir:
 
-| Variável        | Padrão    | Descrição                                                                    |
-| --------------- | --------- | ---------------------------------------------------------------------------- |
-| `START_DATE`    | _(vazio)_ | Data de corte no formato `YYYY-MM-DD`. Eventos anteriores são ignorados.     |
-| `LOOKBACK_DAYS` | `7`       | Quantos dias para trás buscar (usado quando `START_DATE` não está definido). |
+| Tentativa | Aguarda     |
+| --------- | ----------- |
+| 1ª falha  | 5 segundos  |
+| 2ª falha  | 10 segundos |
+| 3ª falha  | 20 segundos |
+
+Erros do tipo 4xx (ticket não encontrado, sem permissão) não são retentados — são erros definitivos.
+
+---
+
+## Health Check
+
+A cada execução o agente atualiza o arquivo `health.json` no repositório:
+
+```json
+{
+  "last_run": "2026-07-02T20:00:41",
+  "status": "ok",
+  "worklogs_launched": 2,
+  "error": ""
+}
+```
+
+Para verificar o status, acesse o arquivo diretamente no GitHub:
+**Code → health.json**
+
+| Campo               | Descrição                            |
+| ------------------- | ------------------------------------ |
+| `last_run`          | Data e hora da última execução (BRT) |
+| `status`            | `ok` ou `error`                      |
+| `worklogs_launched` | Quantidade de worklogs lançados      |
+| `error`             | Mensagem de erro (vazio se ok)       |
 
 ---
 
 ## Agendamento
 
-O agente roda automaticamente **de segunda a sexta** em dois horários:
+O agente roda automaticamente **de segunda a sexta**:
 
-| Execução     | Horário BRT | Horário UTC |
-| ------------ | ----------- | ----------- |
-| Meio-dia     | 12:00       | 15:00       |
-| Final do dia | 18:00       | 21:00       |
+| Execução   | Horário BRT | Horário UTC | O que faz                                     |
+| ---------- | ----------- | ----------- | --------------------------------------------- |
+| Lembrete   | 18:00       | 21:00       | Notifica para lançar eventos no Calendar      |
+| Lançamento | 20:00       | 23:00       | Lança worklogs + horas faltantes + relatórios |
 
-> ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então o agente passa a rodar às 13h e 19h BRT. Ajuste o cron para `"0 14 * * 1-5"` e `"0 20 * * 1-5"` se quiser manter os horários fixos.
-
-Você também pode rodar manualmente a qualquer momento via **Actions → Run workflow**.
+> ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então os horários passam a ser 19h e 21h BRT. Ajuste os crons para `"0 22 * * 1-5"` e `"0 00 * * 1-5"` se quiser manter os horários fixos.
 
 ---
 
@@ -265,6 +325,7 @@ jira-clockwork-agent/
 │   └── agent.py                  # lógica principal do agente
 ├── gerar_token_google.py         # script para gerar o token OAuth (roda uma vez)
 ├── logged_worklogs.json          # controle de eventos já processados
+├── health.json                   # status da última execução
 ├── requirements.txt              # dependências Python
 └── README.md
 ```
@@ -273,28 +334,29 @@ jira-clockwork-agent/
 
 ## Dúvidas frequentes
 
-**O agente vai lançar horas em eventos de reunião ou apenas de trabalho?**
-Todos os eventos com `SCG-XXXX` no título serão processados. Você controla o que o agente lança pelo título dos seus eventos no Calendar.
+**O agente suporta qualquer padrão de ticket?**
+Sim! O agente detecta automaticamente qualquer padrão `PROJ-XXXX` (letras maiúsculas + hífen + número). SCG-1234, CARDS-567, HPAY-890 — todos funcionam sem configuração adicional.
 
 **E se eu esquecer de criar o evento na agenda?**
 Crie o evento retroativamente na agenda com o ticket correto no título. Na próxima execução o agente detecta e lança automaticamente (respeitando o `START_DATE` e `LOOKBACK_DAYS`).
 
+**E se eu deletar um evento já lançado?**
+O agente detecta que o evento sumiu do Calendar e cancela o worklog correspondente no Jira automaticamente, notificando no Telegram.
+
 **E se eu alterar o horário de um evento já lançado?**
-O controle de duplicatas usa o ID do evento do Calendar. Se o evento já foi lançado pelo agente, **não será lançado novamente** mesmo que o horário mude. Para relançar, remova o ID correspondente do `logged_worklogs.json`.
+O controle usa o ID do evento. Se já foi lançado, não será relançado mesmo com horário diferente. Para relançar, remova o ID do `logged_worklogs.json`.
 
 **O token do Google expira?**
 O `refresh_token` não expira. O agente renova o `access_token` automaticamente a cada execução.
 
-**E se o Telegram estiver fora?**
+**E se o Telegram ou Google Chat estiver fora?**
 A notificação falha silenciosamente — o agente continua funcionando e lança os worklogs normalmente. O erro aparece apenas no log do GitHub Actions.
 
-**Posso usar com outro padrão de ticket além de SCG-XXXX?**
-Sim! Edite a linha `SCG_PATTERN` no `src/agent.py`:
+**Como a meta mensal é calculada?**
+A meta considera apenas dias úteis do mês, excluindo finais de semana e feriados nacionais brasileiros (incluindo Carnaval, Sexta-feira Santa e Corpus Christi calculados automaticamente por ano).
 
-```python
-# Exemplo para suportar qualquer padrão PROJ-XXXX
-SCG_PATTERN = re.compile(r"\b([A-Z]+-\d+)\b")
-```
+**As horas faltantes consideram lançamentos manuais?**
+Sim! As horas faltantes são calculadas via JQL diretamente no Jira, buscando tudo que o usuário lançou no dia — independente de ser via agente, manual ou sem evento no Calendar.
 
 ---
 
@@ -303,7 +365,7 @@ SCG_PATTERN = re.compile(r"\b([A-Z]+-\d+)\b")
 PRs são bem-vindos! Sugestões de melhoria:
 
 - Suporte a múltiplos calendários
-- Suporte a outros padrões de ticket além de `SCG-XXXX`
+- Monitoramento externo do health check via VPS
 - Notificação quando o token do Google estiver próximo de expirar
 
 ---
