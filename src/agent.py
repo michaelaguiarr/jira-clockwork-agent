@@ -115,6 +115,8 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
         lines.append("\n❌ <b>Erros:</b>")
         for w in errors:
             lines.append(f"  • {w['issue_key']}  —  {w['reason']}")
+            if "não encontrado" in w["reason"]:
+                lines.append(f"    ↳ Corrija o título do evento no Calendar e será relançado automaticamente")
 
     if not launched and not skipped and not errors:
         lines.append("✅ Tudo em dia! Nenhum worklog novo para lançar.")
@@ -386,11 +388,20 @@ def log_worklog(domain: str, parsed: dict) -> bool:
     if resp.status_code in (200, 201):
         log.info("✅ Worklog lançado: %s | %ds | '%s'",
                  parsed["issue_key"], parsed["duration_seconds"], parsed["comment"])
-        return True
+        return True, None
+    elif resp.status_code == 404:
+        log.error("❌ Ticket não encontrado no Jira: %s", parsed["issue_key"])
+        return False, "ticket_not_found"
+    elif resp.status_code == 401:
+        log.error("❌ Não autorizado — verifique JIRA_EMAIL e JIRA_API_TOKEN")
+        return False, "unauthorized"
+    elif resp.status_code == 403:
+        log.error("❌ Sem permissão para lançar worklog em %s", parsed["issue_key"])
+        return False, "forbidden"
     else:
         log.error("❌ Falha ao lançar worklog em %s: %s %s",
                   parsed["issue_key"], resp.status_code, resp.text)
-        return False
+        return False, "api_error"
 
 
 # ── Controle de duplicatas ─────────────────────────────────────────────────────
@@ -508,7 +519,7 @@ def main():
                 new_logged[eid] = None
                 continue
 
-            success = log_worklog(domain, parsed)
+            success, error_type = log_worklog(domain, parsed)
             if success:
                 # Busca o worklog_id recém criado para poder cancelar depois se necessário
                 wl_id = None
@@ -524,7 +535,20 @@ def main():
                 new_logged[eid] = wl_id
                 launched.append(parsed)
             else:
-                errors.append({**parsed, "reason": "Falha na API do Jira"})
+                # Mapeia o tipo de erro para mensagem amigável
+                error_messages = {
+                    "ticket_not_found": f"Ticket {parsed['issue_key']} não encontrado no Jira — verifique o título do evento",
+                    "unauthorized":     "Credenciais inválidas — verifique JIRA_EMAIL e JIRA_API_TOKEN",
+                    "forbidden":        f"Sem permissão para lançar worklog em {parsed['issue_key']}",
+                    "api_error":        "Falha na API do Jira",
+                }
+                reason = error_messages.get(error_type, "Erro desconhecido")
+
+                # Ticket não encontrado: NÃO marca como processado para tentar de novo
+                if error_type != "ticket_not_found":
+                    new_logged[eid] = None
+
+                errors.append({**parsed, "reason": reason})
 
         save_logged(new_logged)
 
