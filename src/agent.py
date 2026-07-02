@@ -264,7 +264,7 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
     jql = f'worklogAuthor = currentUser() AND worklogDate >= "{date_start}" AND worklogDate <= "{date_end}"'
 
     # Busca os issues via JQL
-    search_url = f"https://{domain}/rest/api/3/search"
+    search_url = f"https://{domain}/rest/api/3/search/jql"
     issue_keys = []
     start_at   = 0
 
