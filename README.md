@@ -13,6 +13,9 @@ Ao final de cada execução, você recebe notificações no **Telegram** e no **
 ```
 GitHub Actions (18h e 20h, seg–sex)
   ↓
+Verificação preventiva de tokens (Google + Jira)
+  → alerta imediato se algum token estiver inválido
+  ↓
 18h → Lembrete no Telegram/Google Chat para lançar eventos no Calendar
   ↓
 20h → Google Calendar API
@@ -76,6 +79,19 @@ Exemplo: SCG-2098 - [JETCARD] Setup Noname
 
 ⏱ Total lançado hoje: 1h00
 ⚠️ Horas faltantes: 2h00 para atingir a meta de 8h
+```
+
+**Alerta de token inválido:**
+
+```
+🔑 Clockwork Agent — Token Jira Inválido
+
+O token de API do Jira está inválido ou foi revogado.
+
+Gere um novo em:
+id.atlassian.com → Security → API tokens
+
+Atualize o Secret JIRA_API_TOKEN no GitHub.
 ```
 
 **Relatório semanal (toda sexta às 20h):**
@@ -225,6 +241,8 @@ No repositório: **Settings → Secrets and variables → Actions → New reposi
 
 > **Dica:** `START_DATE` deve ser o dia em que você começou a usar o agente, para evitar duplicar lançamentos manuais anteriores.
 
+> ⚠️ Sempre volte `FORCE_MODE` e `FORCE_MONTHLY` para vazio após os testes — eles são exclusivos para uso manual.
+
 ---
 
 ### 8. Testar manualmente
@@ -237,6 +255,9 @@ Exemplo de log esperado:
 
 ```
 === Jira Clockwork Agent iniciado === (hora BRT: 20)
+Verificando tokens...
+✅ Token Google Calendar válido
+✅ Token Jira válido — usuário: michael.aguiar
 Data de corte (START_DATE): 2026-07-01
 Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T20:00:00-03:00
 7 evento(s) encontrado(s) no período.
@@ -259,6 +280,30 @@ O agente tem **duas camadas** de proteção:
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Local** (`logged_worklogs.json`) | Registra o ID de cada evento do Calendar já processado. Se o agente já lançou, não lança de novo e não notifica.                                                             |
 | **Jira** (API)                     | Antes de lançar, consulta os worklogs existentes no ticket. Se já há um worklog no mesmo dia com duração parecida (±5 min), pula — mesmo que tenha sido lançado manualmente. |
+
+---
+
+## Verificação preventiva de tokens
+
+No início de **cada execução** (18h e 20h), o agente verifica se os tokens do Google e do Jira ainda são válidos — antes de tentar qualquer operação.
+
+| Token               | O que verifica                                     | Alerta enviado quando                                                          |
+| ------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **Google Calendar** | Tenta renovar o `access_token` via `refresh_token` | O `refresh_token` foi revogado (ex: troca de senha, acesso removido no Google) |
+| **Jira API**        | Chama `GET /rest/api/3/myself`                     | Retorna 401 — token inválido ou revogado                                       |
+
+Se qualquer token estiver inválido, o agente **para imediatamente**, envia um alerta no Telegram/Google Chat com instruções de correção e salva `status=error` no `health.json`.
+
+**Como corrigir o token do Google revogado:**
+
+1. Execute `python gerar_token_google.py` no seu PC
+2. Atualize o Secret `GOOGLE_CREDENTIALS_JSON` no GitHub
+
+**Como corrigir o token do Jira inválido:**
+
+1. Acesse `id.atlassian.com → Security → API tokens`
+2. Gere um novo token
+3. Atualize o Secret `JIRA_API_TOKEN` no GitHub
 
 ---
 
@@ -305,10 +350,10 @@ Para verificar o status, acesse o arquivo diretamente no GitHub:
 
 O agente roda automaticamente **de segunda a sexta**:
 
-| Execução   | Horário BRT | Horário UTC | O que faz                                     |
-| ---------- | ----------- | ----------- | --------------------------------------------- |
-| Lembrete   | 18:00       | 21:00       | Notifica para lançar eventos no Calendar      |
-| Lançamento | 20:00       | 23:00       | Lança worklogs + horas faltantes + relatórios |
+| Execução   | Horário BRT | Horário UTC | O que faz                                                       |
+| ---------- | ----------- | ----------- | --------------------------------------------------------------- |
+| Lembrete   | 18:00       | 21:00       | Verifica tokens + notifica para lançar eventos no Calendar      |
+| Lançamento | 20:00       | 23:00       | Verifica tokens + lança worklogs + horas faltantes + relatórios |
 
 > ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então os horários passam a ser 19h e 21h BRT. Ajuste os crons para `"0 22 * * 1-5"` e `"0 00 * * 1-5"` se quiser manter os horários fixos.
 
@@ -347,7 +392,7 @@ O agente detecta que o evento sumiu do Calendar e cancela o worklog corresponden
 O controle usa o ID do evento. Se já foi lançado, não será relançado mesmo com horário diferente. Para relançar, remova o ID do `logged_worklogs.json`.
 
 **O token do Google expira?**
-O `refresh_token` não expira. O agente renova o `access_token` automaticamente a cada execução.
+O `refresh_token` não expira normalmente. Mas pode ser revogado se você trocar a senha do Google ou remover o acesso do app. Nesse caso, o agente detecta na verificação preventiva e avisa no Telegram com as instruções de correção.
 
 **E se o Telegram ou Google Chat estiver fora?**
 A notificação falha silenciosamente — o agente continua funcionando e lança os worklogs normalmente. O erro aparece apenas no log do GitHub Actions.
@@ -366,7 +411,6 @@ PRs são bem-vindos! Sugestões de melhoria:
 
 - Suporte a múltiplos calendários
 - Monitoramento externo do health check via VPS
-- Notificação quando o token do Google estiver próximo de expirar
 
 ---
 
