@@ -117,7 +117,7 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
             lines.append(f"  • {w['issue_key']}  —  {w['reason']}")
 
     if not launched and not skipped and not errors:
-        lines.append("📭 Nenhum evento com ticket encontrado no período.")
+        lines.append("✅ Tudo em dia! Nenhum worklog novo para lançar.")
 
     total_s = sum(w["duration_seconds"] for w in launched)
     if launched:
@@ -535,7 +535,7 @@ def main():
                              if p["event_id"] in new_logged)
         missing_s      = max(0, DAILY_GOAL_S - total_today_s)
 
-        # Notificação diária
+        # Notificação diária — sempre envia, mesmo sem novidades
         notify_daily(launched, skipped, errors, missing_s)
 
         # Notificação de cancelamentos
