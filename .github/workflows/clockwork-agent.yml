@@ -35,6 +35,7 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_CHAT_WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
           START_DATE: ${{ secrets.START_DATE }}
           LOOKBACK_DAYS: ${{ secrets.LOOKBACK_DAYS }}
           DAILY_HOURS_GOAL: ${{ secrets.DAILY_HOURS_GOAL }}

@@ -29,49 +29,72 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
-# Qualquer padrão PROJ-XXXX (ex: SCG-1234, CARDS-567, HPAY-890)
 TICKET_PATTERN = re.compile(r"\b([A-Z]+-\d+)\b")
 LOGGED_FILE    = Path("logged_worklogs.json")
 BRT            = timezone(timedelta(hours=-3))
-TOLERANCE_S    = 300    # 5 min de tolerância ao comparar duração
+TOLERANCE_S    = 300
 DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
+
+
+# ── Google Chat ────────────────────────────────────────────────────────────────
+
+def send_google_chat(text: str):
+    """Envia mensagem via Google Chat Webhook. Falha silenciosa."""
+    webhook_url = os.environ.get("GOOGLE_CHAT_WEBHOOK", "")
+    if not webhook_url:
+        return
+    try:
+        # Converte HTML do Telegram para formato Google Chat
+        clean = re.sub(r"<b>(.*?)</b>", r"*\1*", text)
+        clean = re.sub(r"<code>(.*?)</code>", r"`\1`", clean)
+        clean = re.sub(r"<[^>]+>", "", clean)
+        resp = requests.post(webhook_url, json={"text": clean}, timeout=10)
+        if not resp.ok:
+            log.warning("Google Chat: falha ao enviar: %s", resp.text)
+    except Exception as e:
+        log.warning("Google Chat: erro de conexão: %s", e)
 
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def send_telegram(text: str):
-    """Envia mensagem via Telegram. Falha silenciosa para não quebrar o agente."""
+    """Envia mensagem via Telegram e Google Chat. Falha silenciosa."""
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         log.warning("Telegram não configurado.")
-        return
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        if not resp.ok:
-            log.warning("Telegram: falha ao enviar: %s", resp.text)
-    except Exception as e:
-        log.warning("Telegram: erro de conexão: %s", e)
+    else:
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            if not resp.ok:
+                log.warning("Telegram: falha ao enviar: %s", resp.text)
+        except Exception as e:
+            log.warning("Telegram: erro de conexão: %s", e)
+
+    # Espelha para o Google Chat
+    send_google_chat(text)
 
 
 def send_telegram_alert(text: str):
-    """Envia alerta de falha via Telegram. Tenta mesmo em caso de erro crítico."""
+    """Envia alerta de falha via Telegram e Google Chat."""
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    if token and chat_id:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    # Espelha alerta no Google Chat
+    send_google_chat(text)
 
 
 def format_seconds(seconds: int) -> str:
@@ -117,7 +140,7 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
         for w in errors:
             lines.append(f"  • {w['issue_key']}  —  {w['reason']}")
             if "não encontrado" in w["reason"]:
-                lines.append(f"    ↳ Corrija o título do evento no Calendar e será relançado automaticamente")
+                lines.append("    ↳ Corrija o título do evento no Calendar e será relançado automaticamente")
 
     if not launched and not skipped and not errors:
         lines.append("✅ Tudo em dia! Nenhum worklog novo para lançar.")
@@ -126,7 +149,6 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
     if launched:
         lines.append(f"\n⏱ <b>Total lançado hoje:</b> {format_seconds(total_s)}")
 
-    # Aviso de horas faltantes
     if missing_seconds > 0:
         lines.append(f"\n⚠️ <b>Horas faltantes:</b> {format_seconds(missing_seconds)} para atingir a meta de {format_seconds(DAILY_GOAL_S)}")
     else:
@@ -146,7 +168,6 @@ def notify_weekly(weekly_logs: list[dict]):
     if not weekly_logs:
         lines.append("📭 Nenhum worklog lançado esta semana.")
     else:
-        # Agrupar por ticket
         by_ticket: dict[str, int] = {}
         days_with_log = set()
         for w in weekly_logs:
@@ -160,12 +181,11 @@ def notify_weekly(weekly_logs: list[dict]):
         lines.append(f"\n⏱ <b>Total semana:</b> {format_seconds(total_s)}")
         lines.append(f"📅 <b>Dias com lançamento:</b> {len(days_with_log)} de 5")
 
-        # Meta semanal (8h × 5 dias)
         weekly_goal = DAILY_GOAL_S * 5
         if total_s < weekly_goal:
             lines.append(f"⚠️ <b>Faltaram:</b> {format_seconds(weekly_goal - total_s)} na semana")
         else:
-            lines.append(f"🎯 <b>Meta semanal atingida!</b>")
+            lines.append("🎯 <b>Meta semanal atingida!</b>")
 
     send_telegram("\n".join(lines))
 
@@ -173,28 +193,14 @@ def notify_weekly(weekly_logs: list[dict]):
 # ── Feriados nacionais brasileiros ────────────────────────────────────────────
 
 def get_national_holidays(year: int) -> set[str]:
-    """
-    Retorna feriados nacionais fixos + Carnaval, Sexta-feira Santa e Corpus Christi.
-    Formato: YYYY-MM-DD
-    """
     holidays = set()
-
-    # Feriados fixos
     fixed = [
-        (1, 1),   # Ano Novo
-        (4, 21),  # Tiradentes
-        (5, 1),   # Dia do Trabalho
-        (9, 7),   # Independência
-        (10, 12), # Nossa Senhora Aparecida
-        (11, 2),  # Finados
-        (11, 15), # Proclamação da República
-        (11, 20), # Consciência Negra (Lei 14.759/2023)
-        (12, 25), # Natal
+        (1, 1), (4, 21), (5, 1), (9, 7), (10, 12),
+        (11, 2), (11, 15), (11, 20), (12, 25),
     ]
     for m, d in fixed:
         holidays.add(f"{year}-{m:02d}-{d:02d}")
 
-    # Páscoa (algoritmo de Butcher)
     a = year % 19
     b = year // 100
     c = year % 100
@@ -211,59 +217,44 @@ def get_national_holidays(year: int) -> set[str]:
     day   = ((h + l - 7 * m_ + 114) % 31) + 1
     easter = datetime(year, month, day)
 
-    # Carnaval (segunda e terça, 48 e 47 dias antes da Páscoa)
     holidays.add((easter - timedelta(days=48)).strftime("%Y-%m-%d"))
     holidays.add((easter - timedelta(days=47)).strftime("%Y-%m-%d"))
-    # Sexta-feira Santa (2 dias antes da Páscoa)
     holidays.add((easter - timedelta(days=2)).strftime("%Y-%m-%d"))
-    # Corpus Christi (60 dias após a Páscoa)
     holidays.add((easter + timedelta(days=60)).strftime("%Y-%m-%d"))
 
     return holidays
 
 
 def count_working_days(year: int, month: int) -> int:
-    """Conta dias úteis do mês excluindo fins de semana e feriados nacionais."""
     holidays = get_national_holidays(year)
     _, last_day = calendar.monthrange(year, month)
     count = 0
     for day in range(1, last_day + 1):
         dt = datetime(year, month, day)
-        date_str = dt.strftime("%Y-%m-%d")
-        if dt.weekday() < 5 and date_str not in holidays:  # seg-sex e não feriado
+        if dt.weekday() < 5 and dt.strftime("%Y-%m-%d") not in holidays:
             count += 1
     return count
 
 
 def is_last_working_day_of_month(dt: datetime) -> bool:
-    """Verifica se hoje é o último dia útil do mês."""
     holidays = get_national_holidays(dt.year)
     _, last_day = calendar.monthrange(dt.year, dt.month)
-
     for day in range(last_day, dt.day - 1, -1):
         candidate = datetime(dt.year, dt.month, day)
-        date_str  = candidate.strftime("%Y-%m-%d")
-        if candidate.weekday() < 5 and date_str not in holidays:
+        if candidate.weekday() < 5 and candidate.strftime("%Y-%m-%d") not in holidays:
             return candidate.day == dt.day
-
     return False
 
 
 # ── Relatório mensal ───────────────────────────────────────────────────────────
 
 def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
-    """
-    Busca TODOS os worklogs lançados pelo usuário no mês via JQL.
-    Inclui lançamentos manuais, via agente e sem evento no Calendar.
-    """
+    """Busca TODOS os worklogs do usuário no mês via JQL."""
     _, last_d  = calendar.monthrange(year, month)
     date_start = f"{year}-{month:02d}-01"
     date_end   = f"{year}-{month:02d}-{last_d:02d}"
 
-    # JQL: todos os issues onde o usuário lançou horas no mês
-    jql = f'worklogAuthor = currentUser() AND worklogDate >= "{date_start}" AND worklogDate <= "{date_end}"'
-
-    # Busca os issues via JQL
+    jql        = f'worklogAuthor = currentUser() AND worklogDate >= "{date_start}" AND worklogDate <= "{date_end}"'
     search_url = f"https://{domain}/rest/api/3/search/jql"
     issue_keys = []
     start_at   = 0
@@ -279,24 +270,21 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
             if resp.status_code != 200:
                 log.error("Erro na busca JQL: %s %s", resp.status_code, resp.text)
                 break
-
             data   = resp.json()
             issues = data.get("issues", [])
             issue_keys.extend(i["key"] for i in issues)
-
             if start_at + len(issues) >= data.get("total", 0):
                 break
             start_at += len(issues)
-
         except Exception as e:
             log.warning("Erro na busca JQL: %s", e)
             break
 
     log.info("JQL retornou %d ticket(s) com worklogs em %s/%s", len(issue_keys), month, year)
 
-    # Busca os worklogs de cada issue no mês
     month_str = f"{year}-{month:02d}"
     result    = []
+    email     = os.environ["JIRA_EMAIL"]
 
     for issue_key in issue_keys:
         url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
@@ -308,9 +296,6 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
             )
             if resp.status_code != 200:
                 continue
-
-            # Filtra só worklogs do usuário atual no mês
-            email = os.environ["JIRA_EMAIL"]
             for wl in resp.json().get("worklogs", []):
                 author_email = wl.get("author", {}).get("emailAddress", "")
                 if (wl.get("started", "").startswith(month_str)
@@ -327,7 +312,7 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
 
 
 def notify_monthly(domain: str, year: int, month: int):
-    """Envia relatório mensal no Telegram."""
+    """Envia relatório mensal."""
     month_name = [
         "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
         "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -337,21 +322,18 @@ def notify_monthly(domain: str, year: int, month: int):
     goal_s       = working_days * DAILY_GOAL_S
     worklogs     = get_monthly_worklogs(domain, year, month)
 
-    # Agrupa por ticket
     by_ticket: dict[str, int] = {}
     for wl in worklogs:
         by_ticket[wl["issue_key"]] = by_ticket.get(wl["issue_key"], 0) + wl["duration_seconds"]
 
-    total_s = sum(by_ticket.values())
-    diff_s  = total_s - goal_s
+    total_s   = sum(by_ticket.values())
+    diff_s    = total_s - goal_s
+    goal_h    = goal_s  / 3600
+    total_h   = total_s / 3600
+    diff_h    = diff_s  / 3600
+    diff_sign = "+" if diff_h >= 0 else ""
 
     lines = [f"📅 <b>Relatório Mensal — {month_name}/{year}</b>\n"]
-
-    # Linha resumo no formato solicitado
-    goal_h  = goal_s  / 3600
-    total_h = total_s / 3600
-    diff_h  = diff_s  / 3600
-    diff_sign = "+" if diff_h >= 0 else ""
     lines.append(
         f"Meta: <b>{goal_h:.2f}h</b>  |  "
         f"Reg: <b>{total_h:.2f}h</b>  |  "
@@ -389,7 +371,6 @@ def build_calendar_service():
 
 
 def get_recent_events(service) -> list[dict]:
-    """Retorna eventos entre START_DATE (ou LOOKBACK_DAYS atrás) e agora."""
     now_brt        = datetime.now(BRT)
     start_date_env = os.environ.get("START_DATE", "").strip()
 
@@ -421,7 +402,6 @@ def get_recent_events(service) -> list[dict]:
 
 
 def get_today_events(service) -> list[dict]:
-    """Retorna todos os eventos de hoje (para calcular total de horas)."""
     now_brt   = datetime.now(BRT)
     start_brt = now_brt.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -437,7 +417,6 @@ def get_today_events(service) -> list[dict]:
 
 
 def get_week_events(service) -> list[dict]:
-    """Retorna eventos da semana atual (seg a hoje) para o relatório semanal."""
     now_brt = datetime.now(BRT)
     monday  = (now_brt - timedelta(days=now_brt.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -506,7 +485,6 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
         )
         if resp.status_code != 200:
             return False
-
         for wl in resp.json().get("worklogs", []):
             wl_date     = wl.get("started", "")[:10]
             wl_duration = wl.get("timeSpentSeconds", 0)
@@ -519,7 +497,6 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
 
 
 def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dict]:
-    """Retorna worklogs do ticket para hoje (para verificar cancelamentos)."""
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
         resp = requests.get(
@@ -529,16 +506,13 @@ def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dic
         )
         if resp.status_code != 200:
             return []
-        return [
-            wl for wl in resp.json().get("worklogs", [])
-            if wl.get("started", "")[:10] == today
-        ]
+        return [wl for wl in resp.json().get("worklogs", [])
+                if wl.get("started", "")[:10] == today]
     except Exception:
         return []
 
 
 def delete_jira_worklog(domain: str, issue_key: str, worklog_id: str) -> bool:
-    """Remove um worklog do Jira."""
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
     try:
         resp = requests.delete(
@@ -557,7 +531,7 @@ def delete_jira_worklog(domain: str, issue_key: str, worklog_id: str) -> bool:
         return False
 
 
-def log_worklog(domain: str, parsed: dict) -> bool:
+def log_worklog(domain: str, parsed: dict):
     url  = f"https://{domain}/rest/api/3/issue/{parsed['issue_key']}/worklog"
     body = {
         "timeSpentSeconds": parsed["duration_seconds"],
@@ -605,10 +579,8 @@ def log_worklog(domain: str, parsed: dict) -> bool:
 # ── Controle de duplicatas ─────────────────────────────────────────────────────
 
 def load_logged() -> dict:
-    """Carrega o controle de worklogs lançados. Formato: {event_id: worklog_id}"""
     if LOGGED_FILE.exists():
         data = json.loads(LOGGED_FILE.read_text())
-        # Suporte ao formato antigo (lista de IDs)
         if isinstance(data.get("logged_event_ids"), list):
             return {eid: None for eid in data["logged_event_ids"]}
         return data.get("logged_worklogs", {})
@@ -622,25 +594,16 @@ def save_logged(logged: dict):
 # ── Cancelamento de worklogs ───────────────────────────────────────────────────
 
 def process_cancellations(domain: str, logged: dict, current_event_ids: set[str]) -> tuple[dict, list[str]]:
-    """
-    Detecta eventos que foram deletados do Calendar mas têm worklog lançado no Jira.
-    Remove o worklog e atualiza o controle local.
-    Retorna (logged atualizado, lista de tickets cancelados para notificação).
-    """
     cancelled = []
-    today     = datetime.now(BRT).date().isoformat()
 
     for event_id, worklog_id in list(logged.items()):
         if event_id in current_event_ids:
-            continue  # evento ainda existe no Calendar
+            continue
 
         if worklog_id is None:
-            # Lançamento antigo sem worklog_id salvo — não consegue cancelar
             del logged[event_id]
             continue
 
-        # Tenta remover o worklog do Jira
-        # Precisamos saber o issue_key — está embutido no worklog_id como "KEY:ID"
         if ":" not in str(worklog_id):
             del logged[event_id]
             continue
@@ -668,12 +631,13 @@ def main():
     try:
         service = build_calendar_service()
     except Exception as e:
-        msg = f"🚨 <b>Clockwork Agent — ERRO CRÍTICO</b>\n\nFalha ao conectar com Google Calendar:\n<code>{e}</code>"
+        msg = (f"🚨 <b>Clockwork Agent — ERRO CRÍTICO</b>\n\n"
+               f"Falha ao conectar com Google Calendar:\n<code>{e}</code>")
         send_telegram_alert(msg)
         raise
 
     # ── Execução das 18h: só lembrete ────────────────────────────────────────
-    force_mode = os.environ.get("FORCE_MODE", "").strip().lower()
+    force_mode  = os.environ.get("FORCE_MODE", "").strip().lower()
     is_reminder = hour < 19 and force_mode != "launch"
     is_launch   = hour >= 19 or force_mode == "launch"
 
@@ -684,10 +648,10 @@ def main():
 
     # ── Execução das 20h: lançamento + verificações ───────────────────────────
     try:
-        events = get_recent_events(service)
+        events            = get_recent_events(service)
         log.info("%d evento(s) encontrado(s) no período.", len(events))
 
-        parsed_events    = [p for e in events if (p := parse_event(e)) is not None]
+        parsed_events     = [p for e in events if (p := parse_event(e)) is not None]
         current_event_ids = {e["id"] for e in events}
         log.info("%d evento(s) com ticket no título.", len(parsed_events))
 
@@ -695,7 +659,6 @@ def main():
         already_logged = set(logged.keys())
         new_logged     = dict(logged)
 
-        # Cancelamentos — eventos deletados do Calendar
         new_logged, cancelled = process_cancellations(domain, new_logged, current_event_ids)
         if cancelled:
             log.info("🗑️  %d worklog(s) cancelado(s): %s", len(cancelled), cancelled)
@@ -719,7 +682,6 @@ def main():
 
             success, error_type = log_worklog(domain, parsed)
             if success:
-                # Busca o worklog_id recém criado para poder cancelar depois se necessário
                 wl_id = None
                 try:
                     jira_wls = get_jira_worklogs_today(domain, parsed["issue_key"], parsed["date"])
@@ -733,7 +695,6 @@ def main():
                 new_logged[eid] = wl_id
                 launched.append(parsed)
             else:
-                # Mapeia o tipo de erro para mensagem amigável
                 error_messages = {
                     "ticket_not_found": f"Ticket {parsed['issue_key']} não encontrado no Jira — verifique o título do evento",
                     "unauthorized":     "Credenciais inválidas — verifique JIRA_EMAIL e JIRA_API_TOKEN",
@@ -742,7 +703,6 @@ def main():
                 }
                 reason = error_messages.get(error_type, "Erro desconhecido")
 
-                # Ticket não encontrado: NÃO marca como processado para tentar de novo
                 if error_type != "ticket_not_found":
                     new_logged[eid] = None
 
@@ -750,20 +710,18 @@ def main():
 
         save_logged(new_logged)
 
-        # Calcular horas lançadas hoje (lançadas agora + já existentes)
-        today_events   = get_today_events(service)
-        today_parsed   = [p for e in today_events if (p := parse_event(e)) is not None]
-        total_today_s  = sum(p["duration_seconds"] for p in today_parsed
-                             if p["event_id"] in new_logged)
-        missing_s      = max(0, DAILY_GOAL_S - total_today_s)
+        # Horas lançadas hoje
+        today_events  = get_today_events(service)
+        today_parsed  = [p for e in today_events if (p := parse_event(e)) is not None]
+        total_today_s = sum(p["duration_seconds"] for p in today_parsed
+                            if p["event_id"] in new_logged)
+        missing_s     = max(0, DAILY_GOAL_S - total_today_s)
 
-        # Notificação diária — sempre envia, mesmo sem novidades
         notify_daily(launched, skipped, errors, missing_s)
 
-        # Notificação de cancelamentos
         if cancelled:
             send_telegram(
-                f"🗑️ <b>Worklogs cancelados</b>\n\n"
+                "🗑️ <b>Worklogs cancelados</b>\n\n"
                 + "\n".join(f"  • {k}" for k in cancelled)
                 + "\n\nOs eventos foram removidos do Calendar e os worklogs foram deletados no Jira."
             )
