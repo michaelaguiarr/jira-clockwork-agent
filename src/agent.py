@@ -11,6 +11,7 @@ import re
 import json
 import base64
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 import calendar
 from pathlib import Path
@@ -31,9 +32,70 @@ log = logging.getLogger(__name__)
 # ── Constantes ─────────────────────────────────────────────────────────────────
 TICKET_PATTERN = re.compile(r"\b([A-Z]+-\d+)\b")
 LOGGED_FILE    = Path("logged_worklogs.json")
+HEALTH_FILE    = Path("health.json")
 BRT            = timezone(timedelta(hours=-3))
 TOLERANCE_S    = 300
 DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
+MAX_RETRIES    = 3
+RETRY_DELAYS   = [5, 10, 20]   # segundos entre tentativas
+
+
+# ── Retry automático ───────────────────────────────────────────────────────────
+
+def requests_with_retry(method: str, url: str, max_retries: int = MAX_RETRIES, **kwargs) -> requests.Response:
+    """
+    Executa uma requisição HTTP com retry automático.
+    Tenta até max_retries vezes em caso de erro de conexão ou 5xx.
+    Erros 4xx (exceto 429) não são retentados — são erros do cliente.
+    """
+    for attempt in range(max_retries):
+        try:
+            resp = requests.request(method, url, **kwargs)
+
+            # 429 Too Many Requests — espera e tenta de novo
+            if resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", RETRY_DELAYS[attempt]))
+                log.warning("Rate limit (429) — aguardando %ds antes de tentar novamente (tentativa %d/%d)",
+                            wait, attempt + 1, max_retries)
+                time.sleep(wait)
+                continue
+
+            # 5xx — erro do servidor, pode ser transitório
+            if resp.status_code >= 500:
+                if attempt < max_retries - 1:
+                    delay = RETRY_DELAYS[attempt]
+                    log.warning("Erro %s — aguardando %ds antes de tentar novamente (tentativa %d/%d)",
+                                resp.status_code, delay, attempt + 1, max_retries)
+                    time.sleep(delay)
+                    continue
+
+            return resp
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if attempt < max_retries - 1:
+                delay = RETRY_DELAYS[attempt]
+                log.warning("Erro de conexão: %s — aguardando %ds (tentativa %d/%d)",
+                            e, delay, attempt + 1, max_retries)
+                time.sleep(delay)
+            else:
+                log.error("Todas as %d tentativas falharam: %s", max_retries, e)
+                raise
+
+    return resp
+
+
+# ── Health check ───────────────────────────────────────────────────────────────
+
+def save_health(status: str, launched: int = 0, error: str = ""):
+    """Salva o health.json com o resultado da última execução."""
+    data = {
+        "last_run":         datetime.now(BRT).strftime("%Y-%m-%dT%H:%M:%S"),
+        "status":           status,          # "ok" | "error"
+        "worklogs_launched": launched,
+        "error":            error,
+    }
+    HEALTH_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    log.info("Health check salvo: status=%s worklogs=%d", status, launched)
 
 
 # ── Google Chat ────────────────────────────────────────────────────────────────
@@ -252,10 +314,7 @@ def jira_auth_header() -> str:
 
 
 def get_jira_worklogs_by_date(domain: str, date: str) -> int:
-    """
-    Busca via JQL todos os worklogs lançados pelo usuário numa data específica.
-    Retorna o total em segundos — inclui lançamentos manuais e via agente.
-    """
+    """Busca via JQL todos os worklogs do usuário numa data. Retorna total em segundos."""
     jql        = f'worklogAuthor = currentUser() AND worklogDate = "{date}"'
     search_url = f"https://{domain}/rest/api/3/search/jql"
     issue_keys = []
@@ -263,8 +322,8 @@ def get_jira_worklogs_by_date(domain: str, date: str) -> int:
 
     while True:
         try:
-            resp = requests.get(
-                search_url,
+            resp = requests_with_retry(
+                "GET", search_url,
                 headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
                 params={"jql": jql, "fields": "summary", "startAt": start_at, "maxResults": 50},
                 timeout=15,
@@ -288,8 +347,8 @@ def get_jira_worklogs_by_date(domain: str, date: str) -> int:
     for issue_key in issue_keys:
         url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
         try:
-            resp = requests.get(
-                url,
+            resp = requests_with_retry(
+                "GET", url,
                 headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
                 timeout=15,
             )
@@ -320,8 +379,8 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
 
     while True:
         try:
-            resp = requests.get(
-                search_url,
+            resp = requests_with_retry(
+                "GET", search_url,
                 headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
                 params={"jql": jql, "fields": "summary", "startAt": start_at, "maxResults": 50},
                 timeout=15,
@@ -348,8 +407,8 @@ def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
     for issue_key in issue_keys:
         url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
         try:
-            resp = requests.get(
-                url,
+            resp = requests_with_retry(
+                "GET", url,
                 headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
                 timeout=15,
             )
@@ -514,8 +573,8 @@ def parse_event(event: dict) -> dict | None:
 def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int) -> bool:
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
-        resp = requests.get(
-            url,
+        resp = requests_with_retry(
+            "GET", url,
             headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
             timeout=15,
         )
@@ -535,8 +594,8 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
 def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dict]:
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
-        resp = requests.get(
-            url,
+        resp = requests_with_retry(
+            "GET", url,
             headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
             timeout=15,
         )
@@ -551,8 +610,8 @@ def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dic
 def delete_jira_worklog(domain: str, issue_key: str, worklog_id: str) -> bool:
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
     try:
-        resp = requests.delete(
-            url,
+        resp = requests_with_retry(
+            "DELETE", url,
             headers={"Authorization": jira_auth_header()},
             timeout=15,
         )
@@ -582,8 +641,8 @@ def log_worklog(domain: str, parsed: dict):
         },
     }
 
-    resp = requests.post(
-        url,
+    resp = requests_with_retry(
+        "POST", url,
         headers={
             "Authorization": jira_auth_header(),
             "Content-Type": "application/json",
@@ -670,6 +729,7 @@ def main():
         msg = (f"🚨 <b>Clockwork Agent — ERRO CRÍTICO</b>\n\n"
                f"Falha ao conectar com Google Calendar:\n<code>{e}</code>")
         send_telegram_alert(msg)
+        save_health("error", error=str(e))
         raise
 
     # ── Execução das 18h: só lembrete ────────────────────────────────────────
@@ -680,6 +740,7 @@ def main():
     if is_reminder and not is_launch:
         log.info("Execução das 18h — enviando lembrete.")
         notify_reminder()
+        save_health("ok")
         return
 
     # ── Execução das 20h: lançamento + verificações ───────────────────────────
@@ -746,7 +807,7 @@ def main():
 
         save_logged(new_logged)
 
-        # ── Horas faltantes via JQL (inclui lançamentos manuais) ─────────────
+        # Horas faltantes via JQL
         today_str     = now_brt.date().isoformat()
         total_today_s = get_jira_worklogs_by_date(domain, today_str)
         missing_s     = max(0, DAILY_GOAL_S - total_today_s)
@@ -774,6 +835,9 @@ def main():
             log.info("Gerando relatório mensal...")
             notify_monthly(domain, now_brt.year, now_brt.month)
 
+        # Health check — salva status de sucesso
+        save_health("ok", launched=len(launched))
+
         log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
 
     except Exception as e:
@@ -783,6 +847,7 @@ def main():
             f"Ocorreu um erro inesperado durante a execução:\n<code>{e}</code>\n\n"
             f"Verifique o log no GitHub Actions."
         )
+        save_health("error", error=str(e))
         raise
 
 
