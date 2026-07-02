@@ -38,7 +38,8 @@ jobs:
           START_DATE: ${{ secrets.START_DATE }}
           LOOKBACK_DAYS: ${{ secrets.LOOKBACK_DAYS }}
           DAILY_HOURS_GOAL: ${{ secrets.DAILY_HOURS_GOAL }}
-          FORCE_MODE: "" # "launch" para forçar lançamento independente do horário
+          FORCE_MODE: ${{ secrets.FORCE_MODE }}
+        # "launch" para forçar lançamento independente do horário
         run: python src/agent.py
 
       - name: Commitar controle de duplicatas
