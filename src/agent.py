@@ -738,9 +738,10 @@ def main():
                            and e["id"] in new_logged]
             notify_weekly(weekly_logs)
 
-        # Relatório mensal — último dia útil do mês às 20h
-        if is_last_working_day_of_month(now_brt):
-            log.info("Último dia útil do mês — gerando relatório mensal...")
+        # Relatório mensal — último dia útil do mês às 20h (ou FORCE_MONTHLY=true)
+        force_monthly = os.environ.get("FORCE_MONTHLY", "").strip().lower() == "true"
+        if is_last_working_day_of_month(now_brt) or force_monthly:
+            log.info("Gerando relatório mensal...")
             notify_monthly(domain, new_logged, now_brt.year, now_brt.month)
 
         log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
