@@ -4,8 +4,8 @@ on:
   schedule:
     # 18h BRT (= 21h UTC) — lembrete para lançar eventos no Calendar
     - cron: "0 21 * * 1-5"
-    # 20h BRT (= 23h UTC) — lança worklogs + verifica horas faltantes
-    - cron: "0 23 * * 1-5"
+    # 23h30 BRT (= 02h30 UTC) — lança worklogs + verifica horas faltantes
+    - cron: "30 2 * * 2-6"
   workflow_dispatch:
 
 jobs:
