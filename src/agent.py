@@ -330,11 +330,12 @@ def main():
         eid = parsed["event_id"]
 
         if eid in already_logged:
+            # Já processado anteriormente — não notifica, só ignora
             log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
-            skipped.append(parsed)
             continue
 
         if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"]):
+            # Novo para o agente mas já existe no Jira (lançamento manual) — notifica
             log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
             skipped.append(parsed)
             new_logged.add(eid)
