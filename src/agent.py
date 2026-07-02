@@ -27,15 +27,100 @@ log = logging.getLogger(__name__)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 SCG_PATTERN = re.compile(r"\b(SCG-\d+)\b", re.IGNORECASE)
-LOGGED_FILE  = Path("logged_worklogs.json")   # controle de duplicatas (comitado no repo)
+LOGGED_FILE  = Path("logged_worklogs.json")
 BRT          = timezone(timedelta(hours=-3))
 TOLERANCE_S  = 300   # 5 min de tolerância ao comparar duração com worklogs existentes
+
+
+# ── Telegram ───────────────────────────────────────────────────────────────────
+
+def send_telegram(text: str):
+    """Envia mensagem via Telegram. Falha silenciosa para não quebrar o agente."""
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        log.warning("Telegram não configurado — TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID ausente.")
+        return
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        if not resp.ok:
+            log.warning("Telegram: falha ao enviar mensagem: %s", resp.text)
+    except Exception as e:
+        log.warning("Telegram: erro de conexão: %s", e)
+
+
+def format_seconds(seconds: int) -> str:
+    """Converte segundos em formato legível (ex: 1h30m)."""
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    if h and m:
+        return f"{h}h{m:02d}m"
+    if h:
+        return f"{h}h"
+    return f"{m}m"
+
+
+def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict]):
+    """Envia notificação diária com resumo da execução."""
+    now_brt = datetime.now(BRT).strftime("%d/%m/%Y %H:%M")
+    lines   = [f"⏱ <b>Clockwork Agent</b> — {now_brt}\n"]
+
+    if launched:
+        lines.append("✅ <b>Lançados:</b>")
+        for w in launched:
+            lines.append(f"  • {w['issue_key']}  |  {format_seconds(w['duration_seconds'])}  |  {w['comment']}")
+
+    if skipped:
+        lines.append("\n⏭ <b>Já existiam no Jira:</b>")
+        for w in skipped:
+            lines.append(f"  • {w['issue_key']}  |  {w['date']}")
+
+    if errors:
+        lines.append("\n❌ <b>Erros:</b>")
+        for w in errors:
+            lines.append(f"  • {w['issue_key']}  —  {w['reason']}")
+
+    if not launched and not skipped and not errors:
+        lines.append("📭 Nenhum evento com SCG encontrado no período.")
+
+    total_s = sum(w["duration_seconds"] for w in launched)
+    if launched:
+        lines.append(f"\n⏱ <b>Total lançado:</b> {format_seconds(total_s)}")
+
+    send_telegram("\n".join(lines))
+
+
+def notify_weekly(weekly_logs: list[dict]):
+    """Envia relatório semanal toda sexta-feira na execução das 18h."""
+    now_brt   = datetime.now(BRT)
+    start_week = (now_brt - timedelta(days=4)).strftime("%d/%m")
+    end_week   = now_brt.strftime("%d/%m")
+
+    lines = [f"📊 <b>Resumo semanal</b> — {start_week} a {end_week}\n"]
+
+    if not weekly_logs:
+        lines.append("📭 Nenhum worklog lançado esta semana.")
+    else:
+        days_with_log = set()
+        total_s = 0
+        for w in weekly_logs:
+            lines.append(f"✅ {w['issue_key']}  |  {format_seconds(w['duration_seconds'])}  |  {w['comment']}")
+            days_with_log.add(w["date"])
+            total_s += w["duration_seconds"]
+
+        lines.append(f"\n⏱ <b>Total semana:</b> {format_seconds(total_s)}")
+        lines.append(f"📅 <b>Dias com lançamento:</b> {len(days_with_log)} de 5")
+
+    send_telegram("\n".join(lines))
 
 
 # ── Helpers Google Calendar ────────────────────────────────────────────────────
 
 def build_calendar_service():
-    """Constrói o serviço do Google Calendar usando credenciais OAuth2."""
     creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
     token_data  = json.loads(creds_json)
 
@@ -55,15 +140,11 @@ def build_calendar_service():
 
 
 def get_recent_events(service) -> list[dict]:
-    """
-    Retorna eventos entre START_DATE (ou LOOKBACK_DAYS atrás) e agora.
-    START_DATE tem prioridade sobre LOOKBACK_DAYS quando definida.
-    """
+    """Retorna eventos entre START_DATE (ou LOOKBACK_DAYS atrás) e agora."""
     now_brt = datetime.now(BRT)
 
     start_date_env = os.environ.get("START_DATE", "").strip()
     if start_date_env:
-        # Formato esperado: YYYY-MM-DD
         start_brt = datetime.strptime(start_date_env, "%Y-%m-%d").replace(
             tzinfo=BRT, hour=0, minute=0, second=0
         )
@@ -90,40 +171,57 @@ def get_recent_events(service) -> list[dict]:
     return result.get("items", [])
 
 
+def get_week_events(service) -> list[dict]:
+    """Retorna eventos SCG da semana atual (seg a hoje) para o relatório semanal."""
+    now_brt   = datetime.now(BRT)
+    monday    = (now_brt - timedelta(days=now_brt.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    time_min  = monday.isoformat()
+    time_max  = now_brt.isoformat()
+
+    result = service.events().list(
+        calendarId="primary",
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    return result.get("items", [])
+
+
 def parse_event(event: dict) -> dict | None:
-    """
-    Extrai SCG-key, duração e título de um evento.
-    Retorna None se o evento não tiver SCG no título ou for dia-inteiro.
-    """
     title = event.get("summary", "")
     match = SCG_PATTERN.search(title)
     if not match:
         return None
 
     issue_key = match.group(1).upper()
-
     start_raw = event.get("start", {})
     end_raw   = event.get("end", {})
 
     if "dateTime" not in start_raw:
-        log.debug("Evento '%s' ignorado: é dia-inteiro.", title)
         return None
 
-    start_dt = datetime.fromisoformat(start_raw["dateTime"])
-    end_dt   = datetime.fromisoformat(end_raw["dateTime"])
+    start_dt         = datetime.fromisoformat(start_raw["dateTime"])
+    end_dt           = datetime.fromisoformat(end_raw["dateTime"])
     duration_seconds = int((end_dt - start_dt).total_seconds())
 
     if duration_seconds <= 0:
         return None
 
+    comment = re.sub(r"^SCG-\d+\s*[-–]\s*", "", title).strip() or title
+
     return {
         "event_id":         event["id"],
         "issue_key":        issue_key,
         "title":            title,
+        "comment":          comment,
         "start":            start_dt.isoformat(),
+        "date":             start_dt.astimezone(BRT).date().isoformat(),
         "duration_seconds": duration_seconds,
         "started_jira":     start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
-        "date":             start_dt.astimezone(BRT).date().isoformat(),
     }
 
 
@@ -136,47 +234,29 @@ def jira_auth_header() -> str:
 
 
 def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int) -> bool:
-    """
-    Verifica se já existe worklog no Jira para o ticket naquele dia com duração parecida.
-    Usa tolerância de TOLERANCE_S segundos para comparar duração.
-    """
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
         resp = requests.get(
             url,
-            headers={
-                "Authorization": jira_auth_header(),
-                "Accept": "application/json",
-            },
+            headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
             timeout=15,
         )
         if resp.status_code != 200:
-            log.warning("Não conseguiu verificar worklogs existentes em %s: %s", issue_key, resp.status_code)
             return False
 
-        worklogs = resp.json().get("worklogs", [])
-        for wl in worklogs:
-            # Compara data (dia) e duração com tolerância
-            started_raw = wl.get("started", "")
-            wl_date = started_raw[:10]   # YYYY-MM-DD
+        for wl in resp.json().get("worklogs", []):
+            wl_date     = wl.get("started", "")[:10]
             wl_duration = wl.get("timeSpentSeconds", 0)
-
             if wl_date == date and abs(wl_duration - duration_seconds) <= TOLERANCE_S:
                 log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
                 return True
-
     except Exception as e:
         log.warning("Erro ao verificar worklogs existentes em %s: %s", issue_key, e)
-
     return False
 
 
 def log_worklog(domain: str, parsed: dict) -> bool:
-    """Lança worklog no Jira. Retorna True se sucesso."""
-    url = f"https://{domain}/rest/api/3/issue/{parsed['issue_key']}/worklog"
-
-    comment_text = re.sub(r"^SCG-\d+\s*[-–]\s*", "", parsed["title"]).strip()
-
+    url  = f"https://{domain}/rest/api/3/issue/{parsed['issue_key']}/worklog"
     body = {
         "timeSpentSeconds": parsed["duration_seconds"],
         "started": parsed["started_jira"],
@@ -185,7 +265,7 @@ def log_worklog(domain: str, parsed: dict) -> bool:
             "version": 1,
             "content": [{
                 "type": "paragraph",
-                "content": [{"type": "text", "text": comment_text or parsed["title"]}],
+                "content": [{"type": "text", "text": parsed["comment"]}],
             }],
         },
     }
@@ -203,7 +283,7 @@ def log_worklog(domain: str, parsed: dict) -> bool:
 
     if resp.status_code in (200, 201):
         log.info("✅ Worklog lançado: %s | %ds | '%s'",
-                 parsed["issue_key"], parsed["duration_seconds"], comment_text)
+                 parsed["issue_key"], parsed["duration_seconds"], parsed["comment"])
         return True
     else:
         log.error("❌ Falha ao lançar worklog em %s: %s %s",
@@ -227,53 +307,62 @@ def save_logged(logged: set[str]):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    domain = os.environ["JIRA_DOMAIN"]
+    domain  = os.environ["JIRA_DOMAIN"]
+    now_brt = datetime.now(BRT)
 
     log.info("=== Jira Clockwork Agent iniciado ===")
 
-    # 1. Buscar eventos do Calendar
     service = build_calendar_service()
     events  = get_recent_events(service)
     log.info("%d evento(s) encontrado(s) no período.", len(events))
 
-    # 2. Filtrar os que têm SCG
     parsed_events = [p for e in events if (p := parse_event(e)) is not None]
     log.info("%d evento(s) com SCG no título.", len(parsed_events))
 
-    if not parsed_events:
-        log.info("Nada a lançar. Encerrando.")
-        return
-
-    # 3. Carregar controle local de duplicatas
     already_logged = load_logged()
     new_logged     = set(already_logged)
 
-    # 4. Processar cada evento
-    launched = 0
+    launched = []
+    skipped  = []
+    errors   = []
+
     for parsed in parsed_events:
         eid = parsed["event_id"]
 
-        # 4a. Já lançado por este agente anteriormente?
         if eid in already_logged:
             log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
+            skipped.append(parsed)
             continue
 
-        # 4b. Já existe worklog manual no Jira para este ticket/dia/duração?
         if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"]):
-            log.info("⏭️  Ignorado (worklog manual detectado): %s | %s", parsed["issue_key"], parsed["date"])
-            new_logged.add(eid)   # marca para não verificar de novo
+            log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
+            skipped.append(parsed)
+            new_logged.add(eid)
             continue
 
-        # 4c. Lança o worklog
         success = log_worklog(domain, parsed)
         if success:
             new_logged.add(eid)
-            launched += 1
+            launched.append(parsed)
+        else:
+            errors.append({**parsed, "reason": "Falha na API do Jira"})
 
-    # 5. Persistir controle local
     save_logged(new_logged)
 
-    log.info("=== Concluído: %d worklog(s) lançado(s) ===", launched)
+    # Notificação diária
+    notify_daily(launched, skipped, errors)
+
+    # Relatório semanal — toda sexta-feira na execução das 18h BRT
+    is_friday   = now_brt.weekday() == 4
+    is_evening  = now_brt.hour >= 18
+    if is_friday and is_evening:
+        log.info("Sexta-feira à noite — gerando relatório semanal...")
+        week_events  = get_week_events(service)
+        weekly_logs  = [p for e in week_events if (p := parse_event(e)) is not None
+                        and e["id"] in new_logged]
+        notify_weekly(weekly_logs)
+
+    log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
 
 
 if __name__ == "__main__":

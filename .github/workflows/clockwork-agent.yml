@@ -5,13 +5,13 @@ on:
     # Roda 12h e 18h BRT (= 15h e 21h UTC)
     - cron: "0 15 * * 1-5"
     - cron: "0 21 * * 1-5"
-  workflow_dispatch: # permite rodar manualmente pelo GitHub
+  workflow_dispatch:
 
 jobs:
   log-hours:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # necessário para commitar o logged_worklogs.json
+      contents: write
 
     steps:
       - name: Checkout
@@ -32,6 +32,8 @@ jobs:
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           START_DATE: "2026-07-01" # ignora eventos anteriores a esta data
           LOOKBACK_DAYS: "7" # usado só se START_DATE não estiver definido
         run: python src/agent.py
