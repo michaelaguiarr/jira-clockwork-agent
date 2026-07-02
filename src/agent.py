@@ -12,6 +12,7 @@ import json
 import base64
 import logging
 from datetime import datetime, timezone, timedelta
+import calendar
 from pathlib import Path
 
 import requests
@@ -165,6 +166,165 @@ def notify_weekly(weekly_logs: list[dict]):
             lines.append(f"⚠️ <b>Faltaram:</b> {format_seconds(weekly_goal - total_s)} na semana")
         else:
             lines.append(f"🎯 <b>Meta semanal atingida!</b>")
+
+    send_telegram("\n".join(lines))
+
+
+# ── Feriados nacionais brasileiros ────────────────────────────────────────────
+
+def get_national_holidays(year: int) -> set[str]:
+    """
+    Retorna feriados nacionais fixos + Carnaval, Sexta-feira Santa e Corpus Christi.
+    Formato: YYYY-MM-DD
+    """
+    holidays = set()
+
+    # Feriados fixos
+    fixed = [
+        (1, 1),   # Ano Novo
+        (4, 21),  # Tiradentes
+        (5, 1),   # Dia do Trabalho
+        (9, 7),   # Independência
+        (10, 12), # Nossa Senhora Aparecida
+        (11, 2),  # Finados
+        (11, 15), # Proclamação da República
+        (11, 20), # Consciência Negra (Lei 14.759/2023)
+        (12, 25), # Natal
+    ]
+    for m, d in fixed:
+        holidays.add(f"{year}-{m:02d}-{d:02d}")
+
+    # Páscoa (algoritmo de Butcher)
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m_ = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m_ + 114) // 31
+    day   = ((h + l - 7 * m_ + 114) % 31) + 1
+    easter = datetime(year, month, day)
+
+    # Carnaval (segunda e terça, 48 e 47 dias antes da Páscoa)
+    holidays.add((easter - timedelta(days=48)).strftime("%Y-%m-%d"))
+    holidays.add((easter - timedelta(days=47)).strftime("%Y-%m-%d"))
+    # Sexta-feira Santa (2 dias antes da Páscoa)
+    holidays.add((easter - timedelta(days=2)).strftime("%Y-%m-%d"))
+    # Corpus Christi (60 dias após a Páscoa)
+    holidays.add((easter + timedelta(days=60)).strftime("%Y-%m-%d"))
+
+    return holidays
+
+
+def count_working_days(year: int, month: int) -> int:
+    """Conta dias úteis do mês excluindo fins de semana e feriados nacionais."""
+    holidays = get_national_holidays(year)
+    _, last_day = calendar.monthrange(year, month)
+    count = 0
+    for day in range(1, last_day + 1):
+        dt = datetime(year, month, day)
+        date_str = dt.strftime("%Y-%m-%d")
+        if dt.weekday() < 5 and date_str not in holidays:  # seg-sex e não feriado
+            count += 1
+    return count
+
+
+def is_last_working_day_of_month(dt: datetime) -> bool:
+    """Verifica se hoje é o último dia útil do mês."""
+    holidays = get_national_holidays(dt.year)
+    _, last_day = calendar.monthrange(dt.year, dt.month)
+
+    for day in range(last_day, dt.day - 1, -1):
+        candidate = datetime(dt.year, dt.month, day)
+        date_str  = candidate.strftime("%Y-%m-%d")
+        if candidate.weekday() < 5 and date_str not in holidays:
+            return candidate.day == dt.day
+
+    return False
+
+
+# ── Relatório mensal ───────────────────────────────────────────────────────────
+
+def get_monthly_worklogs(domain: str, year: int, month: int, logged: dict) -> list[dict]:
+    """
+    Busca worklogs lançados pelo agente no mês via Jira API.
+    Filtra pelos event_ids registrados no logged_worklogs.json.
+    """
+    # Monta set de issue_keys que temos no controle local
+    issue_keys = set()
+    for wl_ref in logged.values():
+        if wl_ref and ":" in str(wl_ref):
+            issue_keys.add(wl_ref.split(":")[0])
+
+    month_str = f"{year}-{month:02d}"
+    result    = []
+
+    for issue_key in issue_keys:
+        url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            for wl in resp.json().get("worklogs", []):
+                if wl.get("started", "").startswith(month_str):
+                    result.append({
+                        "issue_key":        issue_key,
+                        "duration_seconds": wl.get("timeSpentSeconds", 0),
+                        "date":             wl.get("started", "")[:10],
+                    })
+        except Exception as e:
+            log.warning("Erro ao buscar worklogs de %s: %s", issue_key, e)
+
+    return result
+
+
+def notify_monthly(domain: str, logged: dict, year: int, month: int):
+    """Envia relatório mensal no Telegram."""
+    month_name = [
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ][month - 1]
+
+    working_days = count_working_days(year, month)
+    goal_s       = working_days * DAILY_GOAL_S
+    worklogs     = get_monthly_worklogs(domain, year, month, logged)
+
+    # Agrupa por ticket
+    by_ticket: dict[str, int] = {}
+    for wl in worklogs:
+        by_ticket[wl["issue_key"]] = by_ticket.get(wl["issue_key"], 0) + wl["duration_seconds"]
+
+    total_s = sum(by_ticket.values())
+    diff_s  = total_s - goal_s
+
+    lines = [f"📅 <b>Relatório Mensal — {month_name}/{year}</b>\n"]
+
+    # Linha resumo no formato solicitado
+    goal_h  = goal_s  / 3600
+    total_h = total_s / 3600
+    diff_h  = diff_s  / 3600
+    diff_sign = "+" if diff_h >= 0 else ""
+    lines.append(
+        f"Meta: <b>{goal_h:.2f}h</b>  |  "
+        f"Reg: <b>{total_h:.2f}h</b>  |  "
+        f"Dif: <b>{diff_sign}{diff_h:.2f}h</b> {'🎯' if diff_h >= 0 else '⚠️'}"
+    )
+    lines.append(f"📆 Dias úteis: {working_days}")
+
+    if by_ticket:
+        lines.append("\n📋 <b>Por ticket:</b>")
+        for key, secs in sorted(by_ticket.items(), key=lambda x: -x[1]):
+            lines.append(f"  • {key}  |  {format_seconds(secs)}")
 
     send_telegram("\n".join(lines))
 
@@ -577,6 +737,11 @@ def main():
             weekly_logs = [p for e in week_events if (p := parse_event(e)) is not None
                            and e["id"] in new_logged]
             notify_weekly(weekly_logs)
+
+        # Relatório mensal — último dia útil do mês às 20h
+        if is_last_working_day_of_month(now_brt):
+            log.info("Último dia útil do mês — gerando relatório mensal...")
+            notify_monthly(domain, new_logged, now_brt.year, now_brt.month)
 
         log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
 
