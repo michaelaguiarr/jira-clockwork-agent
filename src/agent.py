@@ -44,7 +44,6 @@ def send_google_chat(text: str):
     if not webhook_url:
         return
     try:
-        # Converte HTML do Telegram para formato Google Chat
         clean = re.sub(r"<b>(.*?)</b>", r"*\1*", text)
         clean = re.sub(r"<code>(.*?)</code>", r"`\1`", clean)
         clean = re.sub(r"<[^>]+>", "", clean)
@@ -75,7 +74,6 @@ def send_telegram(text: str):
         except Exception as e:
             log.warning("Telegram: erro de conexão: %s", e)
 
-    # Espelha para o Google Chat
     send_google_chat(text)
 
 
@@ -93,7 +91,6 @@ def send_telegram_alert(text: str):
         except Exception:
             pass
 
-    # Espelha alerta no Google Chat
     send_google_chat(text)
 
 
@@ -246,7 +243,69 @@ def is_last_working_day_of_month(dt: datetime) -> bool:
     return False
 
 
-# ── Relatório mensal ───────────────────────────────────────────────────────────
+# ── Helpers Jira ───────────────────────────────────────────────────────────────
+
+def jira_auth_header() -> str:
+    email = os.environ["JIRA_EMAIL"]
+    token = os.environ["JIRA_API_TOKEN"]
+    return "Basic " + base64.b64encode(f"{email}:{token}".encode()).decode()
+
+
+def get_jira_worklogs_by_date(domain: str, date: str) -> int:
+    """
+    Busca via JQL todos os worklogs lançados pelo usuário numa data específica.
+    Retorna o total em segundos — inclui lançamentos manuais e via agente.
+    """
+    jql        = f'worklogAuthor = currentUser() AND worklogDate = "{date}"'
+    search_url = f"https://{domain}/rest/api/3/search/jql"
+    issue_keys = []
+    start_at   = 0
+
+    while True:
+        try:
+            resp = requests.get(
+                search_url,
+                headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+                params={"jql": jql, "fields": "summary", "startAt": start_at, "maxResults": 50},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                log.warning("JQL horas do dia: erro %s", resp.status_code)
+                break
+            data   = resp.json()
+            issues = data.get("issues", [])
+            issue_keys.extend(i["key"] for i in issues)
+            if start_at + len(issues) >= data.get("total", 0):
+                break
+            start_at += len(issues)
+        except Exception as e:
+            log.warning("JQL horas do dia: %s", e)
+            break
+
+    total_s = 0
+    email   = os.environ["JIRA_EMAIL"]
+
+    for issue_key in issue_keys:
+        url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            for wl in resp.json().get("worklogs", []):
+                author_email = wl.get("author", {}).get("emailAddress", "")
+                if (wl.get("started", "")[:10] == date
+                        and author_email.lower() == email.lower()):
+                    total_s += wl.get("timeSpentSeconds", 0)
+        except Exception as e:
+            log.warning("Erro ao buscar worklogs de %s: %s", issue_key, e)
+
+    log.info("Total lançado no Jira em %s: %ds (%s)", date, total_s, format_seconds(total_s))
+    return total_s
+
 
 def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
     """Busca TODOS os worklogs do usuário no mês via JQL."""
@@ -401,21 +460,6 @@ def get_recent_events(service) -> list[dict]:
     return result.get("items", [])
 
 
-def get_today_events(service) -> list[dict]:
-    now_brt   = datetime.now(BRT)
-    start_brt = now_brt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=start_brt.isoformat(),
-        timeMax=now_brt.isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-
-    return result.get("items", [])
-
-
 def get_week_events(service) -> list[dict]:
     now_brt = datetime.now(BRT)
     monday  = (now_brt - timedelta(days=now_brt.weekday())).replace(
@@ -465,14 +509,6 @@ def parse_event(event: dict) -> dict | None:
         "duration_seconds": duration_seconds,
         "started_jira":     start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
     }
-
-
-# ── Helpers Jira ───────────────────────────────────────────────────────────────
-
-def jira_auth_header() -> str:
-    email = os.environ["JIRA_EMAIL"]
-    token = os.environ["JIRA_API_TOKEN"]
-    return "Basic " + base64.b64encode(f"{email}:{token}".encode()).decode()
 
 
 def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int) -> bool:
@@ -710,11 +746,9 @@ def main():
 
         save_logged(new_logged)
 
-        # Horas lançadas hoje
-        today_events  = get_today_events(service)
-        today_parsed  = [p for e in today_events if (p := parse_event(e)) is not None]
-        total_today_s = sum(p["duration_seconds"] for p in today_parsed
-                            if p["event_id"] in new_logged)
+        # ── Horas faltantes via JQL (inclui lançamentos manuais) ─────────────
+        today_str     = now_brt.date().isoformat()
+        total_today_s = get_jira_worklogs_by_date(domain, today_str)
         missing_s     = max(0, DAILY_GOAL_S - total_today_s)
 
         notify_daily(launched, skipped, errors, missing_s)
