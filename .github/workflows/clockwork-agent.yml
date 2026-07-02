@@ -2,9 +2,10 @@ name: Clockwork Agent
 
 on:
   schedule:
-    # Roda 12h e 18h BRT (= 15h e 21h UTC)
-    - cron: "0 15 * * 1-5"
+    # 18h BRT (= 21h UTC) — lembrete para lançar eventos no Calendar
     - cron: "0 21 * * 1-5"
+    # 20h BRT (= 23h UTC) — lança worklogs + verifica horas faltantes
+    - cron: "0 23 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -34,8 +35,9 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          START_DATE: "2026-07-01" # ignora eventos anteriores a esta data
-          LOOKBACK_DAYS: "7" # usado só se START_DATE não estiver definido
+          START_DATE: ${{ secrets.START_DATE }}
+          LOOKBACK_DAYS: ${{ secrets.LOOKBACK_DAYS }}
+          DAILY_HOURS_GOAL: ${{ secrets.DAILY_HOURS_GOAL }}
         run: python src/agent.py
 
       - name: Commitar controle de duplicatas

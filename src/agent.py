@@ -1,7 +1,9 @@
 """
 Jira Clockwork Agent
 Lê eventos do Google Calendar e lança worklogs no Jira (sincronizado com Clockwork Pro).
-Roda via GitHub Actions duas vezes ao dia.
+Roda via GitHub Actions:
+  - 18h BRT: lembrete para lançar eventos no Calendar
+  - 20h BRT: lança worklogs + verifica horas faltantes + relatório semanal (sextas)
 """
 
 import os
@@ -26,10 +28,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
-SCG_PATTERN = re.compile(r"\b(SCG-\d+)\b", re.IGNORECASE)
-LOGGED_FILE  = Path("logged_worklogs.json")
-BRT          = timezone(timedelta(hours=-3))
-TOLERANCE_S  = 300   # 5 min de tolerância ao comparar duração com worklogs existentes
+# Qualquer padrão PROJ-XXXX (ex: SCG-1234, CARDS-567, HPAY-890)
+TICKET_PATTERN = re.compile(r"\b([A-Z]+-\d+)\b")
+LOGGED_FILE    = Path("logged_worklogs.json")
+BRT            = timezone(timedelta(hours=-3))
+TOLERANCE_S    = 300    # 5 min de tolerância ao comparar duração
+DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
 
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
@@ -39,7 +43,7 @@ def send_telegram(text: str):
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
-        log.warning("Telegram não configurado — TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID ausente.")
+        log.warning("Telegram não configurado.")
         return
     try:
         resp = requests.post(
@@ -48,13 +52,28 @@ def send_telegram(text: str):
             timeout=10,
         )
         if not resp.ok:
-            log.warning("Telegram: falha ao enviar mensagem: %s", resp.text)
+            log.warning("Telegram: falha ao enviar: %s", resp.text)
     except Exception as e:
         log.warning("Telegram: erro de conexão: %s", e)
 
 
+def send_telegram_alert(text: str):
+    """Envia alerta de falha via Telegram. Tenta mesmo em caso de erro crítico."""
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def format_seconds(seconds: int) -> str:
-    """Converte segundos em formato legível (ex: 1h30m)."""
     h = seconds // 3600
     m = (seconds % 3600) // 60
     if h and m:
@@ -64,8 +83,21 @@ def format_seconds(seconds: int) -> str:
     return f"{m}m"
 
 
-def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict]):
-    """Envia notificação diária com resumo da execução."""
+# ── Notificações ───────────────────────────────────────────────────────────────
+
+def notify_reminder():
+    """Lembrete das 18h para lançar eventos no Calendar."""
+    now_brt = datetime.now(BRT).strftime("%d/%m/%Y")
+    send_telegram(
+        f"🔔 <b>Lembrete — {now_brt}</b>\n\n"
+        "Não esqueça de lançar seus eventos no Google Calendar com o código do ticket!\n\n"
+        "Exemplo: <code>SCG-2098 - [JETCARD] Setup Noname</code>\n\n"
+        "⏰ Os worklogs serão lançados automaticamente às 20h."
+    )
+
+
+def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], missing_seconds: int):
+    """Notificação das 20h com resumo do lançamento e horas faltantes."""
     now_brt = datetime.now(BRT).strftime("%d/%m/%Y %H:%M")
     lines   = [f"⏱ <b>Clockwork Agent</b> — {now_brt}\n"]
 
@@ -85,18 +117,24 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict]):
             lines.append(f"  • {w['issue_key']}  —  {w['reason']}")
 
     if not launched and not skipped and not errors:
-        lines.append("📭 Nenhum evento com SCG encontrado no período.")
+        lines.append("📭 Nenhum evento com ticket encontrado no período.")
 
     total_s = sum(w["duration_seconds"] for w in launched)
     if launched:
-        lines.append(f"\n⏱ <b>Total lançado:</b> {format_seconds(total_s)}")
+        lines.append(f"\n⏱ <b>Total lançado hoje:</b> {format_seconds(total_s)}")
+
+    # Aviso de horas faltantes
+    if missing_seconds > 0:
+        lines.append(f"\n⚠️ <b>Horas faltantes:</b> {format_seconds(missing_seconds)} para atingir a meta de {format_seconds(DAILY_GOAL_S)}")
+    else:
+        lines.append(f"\n🎯 <b>Meta diária atingida!</b> {format_seconds(DAILY_GOAL_S)} lançadas.")
 
     send_telegram("\n".join(lines))
 
 
 def notify_weekly(weekly_logs: list[dict]):
-    """Envia relatório semanal toda sexta-feira na execução das 18h."""
-    now_brt   = datetime.now(BRT)
+    """Relatório semanal toda sexta-feira às 20h."""
+    now_brt    = datetime.now(BRT)
     start_week = (now_brt - timedelta(days=4)).strftime("%d/%m")
     end_week   = now_brt.strftime("%d/%m")
 
@@ -105,15 +143,26 @@ def notify_weekly(weekly_logs: list[dict]):
     if not weekly_logs:
         lines.append("📭 Nenhum worklog lançado esta semana.")
     else:
+        # Agrupar por ticket
+        by_ticket: dict[str, int] = {}
         days_with_log = set()
-        total_s = 0
         for w in weekly_logs:
-            lines.append(f"✅ {w['issue_key']}  |  {format_seconds(w['duration_seconds'])}  |  {w['comment']}")
+            by_ticket[w["issue_key"]] = by_ticket.get(w["issue_key"], 0) + w["duration_seconds"]
             days_with_log.add(w["date"])
-            total_s += w["duration_seconds"]
+
+        total_s = sum(by_ticket.values())
+        for key, secs in sorted(by_ticket.items()):
+            lines.append(f"✅ {key}  |  {format_seconds(secs)}")
 
         lines.append(f"\n⏱ <b>Total semana:</b> {format_seconds(total_s)}")
         lines.append(f"📅 <b>Dias com lançamento:</b> {len(days_with_log)} de 5")
+
+        # Meta semanal (8h × 5 dias)
+        weekly_goal = DAILY_GOAL_S * 5
+        if total_s < weekly_goal:
+            lines.append(f"⚠️ <b>Faltaram:</b> {format_seconds(weekly_goal - total_s)} na semana")
+        else:
+            lines.append(f"🎯 <b>Meta semanal atingida!</b>")
 
     send_telegram("\n".join(lines))
 
@@ -122,7 +171,7 @@ def notify_weekly(weekly_logs: list[dict]):
 
 def build_calendar_service():
     creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
-    token_data  = json.loads(creds_json)
+    token_data = json.loads(creds_json)
 
     creds = Credentials(
         token=token_data.get("token"),
@@ -141,9 +190,9 @@ def build_calendar_service():
 
 def get_recent_events(service) -> list[dict]:
     """Retorna eventos entre START_DATE (ou LOOKBACK_DAYS atrás) e agora."""
-    now_brt = datetime.now(BRT)
-
+    now_brt        = datetime.now(BRT)
     start_date_env = os.environ.get("START_DATE", "").strip()
+
     if start_date_env:
         start_brt = datetime.strptime(start_date_env, "%Y-%m-%d").replace(
             tzinfo=BRT, hour=0, minute=0, second=0
@@ -171,19 +220,33 @@ def get_recent_events(service) -> list[dict]:
     return result.get("items", [])
 
 
-def get_week_events(service) -> list[dict]:
-    """Retorna eventos SCG da semana atual (seg a hoje) para o relatório semanal."""
+def get_today_events(service) -> list[dict]:
+    """Retorna todos os eventos de hoje (para calcular total de horas)."""
     now_brt   = datetime.now(BRT)
-    monday    = (now_brt - timedelta(days=now_brt.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    time_min  = monday.isoformat()
-    time_max  = now_brt.isoformat()
+    start_brt = now_brt.replace(hour=0, minute=0, second=0, microsecond=0)
 
     result = service.events().list(
         calendarId="primary",
-        timeMin=time_min,
-        timeMax=time_max,
+        timeMin=start_brt.isoformat(),
+        timeMax=now_brt.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    return result.get("items", [])
+
+
+def get_week_events(service) -> list[dict]:
+    """Retorna eventos da semana atual (seg a hoje) para o relatório semanal."""
+    now_brt = datetime.now(BRT)
+    monday  = (now_brt - timedelta(days=now_brt.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    result = service.events().list(
+        calendarId="primary",
+        timeMin=monday.isoformat(),
+        timeMax=now_brt.isoformat(),
         singleEvents=True,
         orderBy="startTime",
     ).execute()
@@ -193,7 +256,7 @@ def get_week_events(service) -> list[dict]:
 
 def parse_event(event: dict) -> dict | None:
     title = event.get("summary", "")
-    match = SCG_PATTERN.search(title)
+    match = TICKET_PATTERN.search(title)
     if not match:
         return None
 
@@ -211,7 +274,7 @@ def parse_event(event: dict) -> dict | None:
     if duration_seconds <= 0:
         return None
 
-    comment = re.sub(r"^SCG-\d+\s*[-–]\s*", "", title).strip() or title
+    comment = re.sub(r"^[A-Z]+-\d+\s*[-–]\s*", "", title).strip() or title
 
     return {
         "event_id":         event["id"],
@@ -251,8 +314,47 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
                 log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
                 return True
     except Exception as e:
-        log.warning("Erro ao verificar worklogs existentes em %s: %s", issue_key, e)
+        log.warning("Erro ao verificar worklogs em %s: %s", issue_key, e)
     return False
+
+
+def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dict]:
+    """Retorna worklogs do ticket para hoje (para verificar cancelamentos)."""
+    url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        return [
+            wl for wl in resp.json().get("worklogs", [])
+            if wl.get("started", "")[:10] == today
+        ]
+    except Exception:
+        return []
+
+
+def delete_jira_worklog(domain: str, issue_key: str, worklog_id: str) -> bool:
+    """Remove um worklog do Jira."""
+    url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
+    try:
+        resp = requests.delete(
+            url,
+            headers={"Authorization": jira_auth_header()},
+            timeout=15,
+        )
+        if resp.status_code == 204:
+            log.info("🗑️  Worklog removido: %s | id=%s", issue_key, worklog_id)
+            return True
+        else:
+            log.error("❌ Falha ao remover worklog %s: %s", worklog_id, resp.status_code)
+            return False
+    except Exception as e:
+        log.error("Erro ao remover worklog %s: %s", worklog_id, e)
+        return False
 
 
 def log_worklog(domain: str, parsed: dict) -> bool:
@@ -291,17 +393,58 @@ def log_worklog(domain: str, parsed: dict) -> bool:
         return False
 
 
-# ── Controle de duplicatas (local) ─────────────────────────────────────────────
+# ── Controle de duplicatas ─────────────────────────────────────────────────────
 
-def load_logged() -> set[str]:
+def load_logged() -> dict:
+    """Carrega o controle de worklogs lançados. Formato: {event_id: worklog_id}"""
     if LOGGED_FILE.exists():
         data = json.loads(LOGGED_FILE.read_text())
-        return set(data.get("logged_event_ids", []))
-    return set()
+        # Suporte ao formato antigo (lista de IDs)
+        if isinstance(data.get("logged_event_ids"), list):
+            return {eid: None for eid in data["logged_event_ids"]}
+        return data.get("logged_worklogs", {})
+    return {}
 
 
-def save_logged(logged: set[str]):
-    LOGGED_FILE.write_text(json.dumps({"logged_event_ids": sorted(logged)}, indent=2))
+def save_logged(logged: dict):
+    LOGGED_FILE.write_text(json.dumps({"logged_worklogs": logged}, indent=2))
+
+
+# ── Cancelamento de worklogs ───────────────────────────────────────────────────
+
+def process_cancellations(domain: str, logged: dict, current_event_ids: set[str]) -> tuple[dict, list[str]]:
+    """
+    Detecta eventos que foram deletados do Calendar mas têm worklog lançado no Jira.
+    Remove o worklog e atualiza o controle local.
+    Retorna (logged atualizado, lista de tickets cancelados para notificação).
+    """
+    cancelled = []
+    today     = datetime.now(BRT).date().isoformat()
+
+    for event_id, worklog_id in list(logged.items()):
+        if event_id in current_event_ids:
+            continue  # evento ainda existe no Calendar
+
+        if worklog_id is None:
+            # Lançamento antigo sem worklog_id salvo — não consegue cancelar
+            del logged[event_id]
+            continue
+
+        # Tenta remover o worklog do Jira
+        # Precisamos saber o issue_key — está embutido no worklog_id como "KEY:ID"
+        if ":" not in str(worklog_id):
+            del logged[event_id]
+            continue
+
+        issue_key, wl_id = worklog_id.split(":", 1)
+        log.info("🗑️  Evento deletado do Calendar detectado: %s | worklog=%s", issue_key, wl_id)
+
+        if delete_jira_worklog(domain, issue_key, wl_id):
+            cancelled.append(issue_key)
+
+        del logged[event_id]
+
+    return logged, cancelled
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -309,61 +452,114 @@ def save_logged(logged: set[str]):
 def main():
     domain  = os.environ["JIRA_DOMAIN"]
     now_brt = datetime.now(BRT)
+    hour    = now_brt.hour
 
-    log.info("=== Jira Clockwork Agent iniciado ===")
+    log.info("=== Jira Clockwork Agent iniciado === (hora BRT: %d)", hour)
 
-    service = build_calendar_service()
-    events  = get_recent_events(service)
-    log.info("%d evento(s) encontrado(s) no período.", len(events))
+    try:
+        service = build_calendar_service()
+    except Exception as e:
+        msg = f"🚨 <b>Clockwork Agent — ERRO CRÍTICO</b>\n\nFalha ao conectar com Google Calendar:\n<code>{e}</code>"
+        send_telegram_alert(msg)
+        raise
 
-    parsed_events = [p for e in events if (p := parse_event(e)) is not None]
-    log.info("%d evento(s) com SCG no título.", len(parsed_events))
+    # ── Execução das 18h: só lembrete ────────────────────────────────────────
+    if hour < 19:
+        log.info("Execução das 18h — enviando lembrete.")
+        notify_reminder()
+        return
 
-    already_logged = load_logged()
-    new_logged     = set(already_logged)
+    # ── Execução das 20h: lançamento + verificações ───────────────────────────
+    try:
+        events = get_recent_events(service)
+        log.info("%d evento(s) encontrado(s) no período.", len(events))
 
-    launched = []
-    skipped  = []
-    errors   = []
+        parsed_events    = [p for e in events if (p := parse_event(e)) is not None]
+        current_event_ids = {e["id"] for e in events}
+        log.info("%d evento(s) com ticket no título.", len(parsed_events))
 
-    for parsed in parsed_events:
-        eid = parsed["event_id"]
+        logged         = load_logged()
+        already_logged = set(logged.keys())
+        new_logged     = dict(logged)
 
-        if eid in already_logged:
-            # Já processado anteriormente — não notifica, só ignora
-            log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
-            continue
+        # Cancelamentos — eventos deletados do Calendar
+        new_logged, cancelled = process_cancellations(domain, new_logged, current_event_ids)
+        if cancelled:
+            log.info("🗑️  %d worklog(s) cancelado(s): %s", len(cancelled), cancelled)
 
-        if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"]):
-            # Novo para o agente mas já existe no Jira (lançamento manual) — notifica
-            log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
-            skipped.append(parsed)
-            new_logged.add(eid)
-            continue
+        launched = []
+        skipped  = []
+        errors   = []
 
-        success = log_worklog(domain, parsed)
-        if success:
-            new_logged.add(eid)
-            launched.append(parsed)
-        else:
-            errors.append({**parsed, "reason": "Falha na API do Jira"})
+        for parsed in parsed_events:
+            eid = parsed["event_id"]
 
-    save_logged(new_logged)
+            if eid in already_logged:
+                log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
+                continue
 
-    # Notificação diária
-    notify_daily(launched, skipped, errors)
+            if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"]):
+                log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
+                skipped.append(parsed)
+                new_logged[eid] = None
+                continue
 
-    # Relatório semanal — toda sexta-feira na execução das 18h BRT
-    is_friday   = now_brt.weekday() == 4
-    is_evening  = now_brt.hour >= 18
-    if is_friday and is_evening:
-        log.info("Sexta-feira à noite — gerando relatório semanal...")
-        week_events  = get_week_events(service)
-        weekly_logs  = [p for e in week_events if (p := parse_event(e)) is not None
-                        and e["id"] in new_logged]
-        notify_weekly(weekly_logs)
+            success = log_worklog(domain, parsed)
+            if success:
+                # Busca o worklog_id recém criado para poder cancelar depois se necessário
+                wl_id = None
+                try:
+                    jira_wls = get_jira_worklogs_today(domain, parsed["issue_key"], parsed["date"])
+                    for wl in reversed(jira_wls):
+                        if abs(wl.get("timeSpentSeconds", 0) - parsed["duration_seconds"]) <= TOLERANCE_S:
+                            wl_id = f"{parsed['issue_key']}:{wl['id']}"
+                            break
+                except Exception:
+                    pass
 
-    log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
+                new_logged[eid] = wl_id
+                launched.append(parsed)
+            else:
+                errors.append({**parsed, "reason": "Falha na API do Jira"})
+
+        save_logged(new_logged)
+
+        # Calcular horas lançadas hoje (lançadas agora + já existentes)
+        today_events   = get_today_events(service)
+        today_parsed   = [p for e in today_events if (p := parse_event(e)) is not None]
+        total_today_s  = sum(p["duration_seconds"] for p in today_parsed
+                             if p["event_id"] in new_logged)
+        missing_s      = max(0, DAILY_GOAL_S - total_today_s)
+
+        # Notificação diária
+        notify_daily(launched, skipped, errors, missing_s)
+
+        # Notificação de cancelamentos
+        if cancelled:
+            send_telegram(
+                f"🗑️ <b>Worklogs cancelados</b>\n\n"
+                + "\n".join(f"  • {k}" for k in cancelled)
+                + "\n\nOs eventos foram removidos do Calendar e os worklogs foram deletados no Jira."
+            )
+
+        # Relatório semanal — toda sexta-feira às 20h
+        if now_brt.weekday() == 4:
+            log.info("Sexta-feira — gerando relatório semanal...")
+            week_events = get_week_events(service)
+            weekly_logs = [p for e in week_events if (p := parse_event(e)) is not None
+                           and e["id"] in new_logged]
+            notify_weekly(weekly_logs)
+
+        log.info("=== Concluído: %d worklog(s) lançado(s) ===", len(launched))
+
+    except Exception as e:
+        log.error("Erro inesperado: %s", e)
+        send_telegram_alert(
+            f"🚨 <b>Clockwork Agent — ERRO</b>\n\n"
+            f"Ocorreu um erro inesperado durante a execução:\n<code>{e}</code>\n\n"
+            f"Verifique o log no GitHub Actions."
+        )
+        raise
 
 
 if __name__ == "__main__":
