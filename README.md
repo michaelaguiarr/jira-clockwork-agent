@@ -448,3 +448,4 @@ PRs são bem-vindos! Sugestões de melhoria:
 ---
 
 <p align="center">Feito com ☕ para automatizar o chato e focar no que importa.</p>
+.
