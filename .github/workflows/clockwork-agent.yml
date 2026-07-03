@@ -3,7 +3,7 @@ name: Clockwork Agent
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [clockwork]
+    types: [reminder, launch]
 
 jobs:
   log-hours:
@@ -40,6 +40,7 @@ jobs:
           DAILY_HOURS_GOAL: ${{ secrets.DAILY_HOURS_GOAL }}
           FORCE_MODE: ${{ secrets.FORCE_MODE }}
           FORCE_MONTHLY: ${{ secrets.FORCE_MONTHLY }}
+          EVENT_TYPE: ${{ github.event.action }}
         run: python src/agent.py
 
       - name: Commitar arquivos de controle

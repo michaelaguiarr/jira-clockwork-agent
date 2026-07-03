@@ -1,10 +1,9 @@
 """
 Jira Clockwork Agent
 Lê eventos do Google Calendar e lança worklogs no Jira (sincronizado com Clockwork Pro).
-Roda via GitHub Actions a cada 30 minutos — o agente decide o que fazer baseado na hora BRT:
-  - 18h00–18h59 BRT: lembrete para lançar eventos no Calendar
-  - 23h30–00h29 BRT: lança worklogs + verifica horas faltantes + relatório semanal (sextas)
-  - Outros horários: encerra silenciosamente
+Roda via GitHub Actions disparado pelo cron-job.org:
+  - event_type "reminder" → lembrete para lançar eventos no Calendar
+  - event_type "launch"   → lança worklogs + verifica horas faltantes + relatórios
 """
 
 import os
@@ -40,41 +39,24 @@ DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
 MAX_RETRIES    = 3
 RETRY_DELAYS   = [5, 10, 20]
 
-# ── Janelas de execução BRT ────────────────────────────────────────────────────
-# Lembrete:   18h00–18h59
-# Lançamento: 23h30–23h59 ou 00h00–00h29 (passa da meia-noite)
-REMINDER_START = (18, 0)
-REMINDER_END   = (18, 59)
-LAUNCH_START   = (23, 30)
-LAUNCH_END     = (0, 29)
 
-
-def get_execution_mode(now_brt: datetime, force_mode: str) -> str:
+def get_execution_mode() -> str:
     """
-    Retorna o modo de execução baseado na hora BRT atual.
-    Modos: 'reminder', 'launch', 'skip'
+    Determina o modo de execução:
+    1. FORCE_MODE (Secret do GitHub) — para testes manuais
+    2. EVENT_TYPE (passado pelo workflow via repository_dispatch)
+    3. workflow_dispatch sem event_type → launch por padrão
     """
-    if force_mode == "reminder":
-        return "reminder"
-    if force_mode == "launch":
-        return "launch"
+    force_mode = os.environ.get("FORCE_MODE", "").strip().lower()
+    if force_mode in ("reminder", "launch"):
+        return force_mode
 
-    h, m  = now_brt.hour, now_brt.minute
-    total = h * 60 + m
+    event_type = os.environ.get("EVENT_TYPE", "").strip().lower()
+    if event_type in ("reminder", "launch"):
+        return event_type
 
-    reminder_start = REMINDER_START[0] * 60 + REMINDER_START[1]
-    reminder_end   = REMINDER_END[0]   * 60 + REMINDER_END[1]
-    launch_start   = LAUNCH_START[0]   * 60 + LAUNCH_START[1]
-    launch_end     = LAUNCH_END[0]     * 60 + LAUNCH_END[1]
-
-    if reminder_start <= total <= reminder_end:
-        return "reminder"
-
-    # Lançamento: 23h30–23h59 ou 00h00–00h29 (passa da meia-noite)
-    if total >= launch_start or total <= launch_end:
-        return "launch"
-
-    return "skip"
+    # workflow_dispatch manual sem FORCE_MODE → launch por padrão
+    return "launch"
 
 
 # ── Retry automático ───────────────────────────────────────────────────────────
@@ -253,7 +235,7 @@ def notify_reminder():
         f"🔔 <b>Lembrete — {now_brt}</b>\n\n"
         "Não esqueça de lançar seus eventos no Google Calendar com o código do ticket!\n\n"
         "Exemplo: <code>SCG-2098 - [JETCARD] Setup Noname</code>\n\n"
-        "⏰ Os worklogs serão lançados automaticamente às 23h30."
+        "⏰ Os worklogs serão lançados automaticamente pelo agente mais tarde."
     )
 
 
@@ -796,13 +778,8 @@ def main():
     log.info("=== Jira Clockwork Agent iniciado === (%s BRT)", now_brt.strftime("%H:%M"))
 
     # ── Determina modo de execução ────────────────────────────────────────────
-    force_mode = os.environ.get("FORCE_MODE", "").strip().lower()
-    mode       = get_execution_mode(now_brt, force_mode)
+    mode = get_execution_mode()
     log.info("Modo: %s", mode)
-
-    if mode == "skip":
-        log.info("Fora da janela de execução — encerrando.")
-        return
 
     # ── Constrói serviço Google Calendar ─────────────────────────────────────
     try:
@@ -823,21 +800,15 @@ def main():
         save_health("error", error="Token inválido detectado na verificação preventiva")
         return
 
-    # ── Modo lembrete (18h) ───────────────────────────────────────────────────
+    # ── Modo lembrete ─────────────────────────────────────────────────────────
     if mode == "reminder":
-        log.info("Enviando lembrete das 18h...")
+        log.info("Enviando lembrete...")
         notify_reminder()
         save_health("ok")
         return
 
-    # ── Modo lançamento (23h30) ───────────────────────────────────────────────
+    # ── Modo lançamento ───────────────────────────────────────────────────────
     try:
-        # Se após meia-noite, usa a data de ontem para os relatórios
-        launch_date = now_brt
-        if now_brt.hour == 0:
-            launch_date = now_brt - timedelta(days=1)
-            log.info("Após meia-noite — usando data de ontem: %s", launch_date.date())
-
         events            = get_recent_events(service)
         log.info("%d evento(s) encontrado(s) no período.", len(events))
 
@@ -900,7 +871,7 @@ def main():
 
         save_logged(new_logged)
 
-        today_str     = launch_date.date().isoformat()
+        today_str     = now_brt.date().isoformat()
         total_today_s = get_jira_worklogs_by_date(domain, today_str)
         missing_s     = max(0, DAILY_GOAL_S - total_today_s)
 
@@ -914,7 +885,7 @@ def main():
             )
 
         # Relatório semanal — toda sexta-feira
-        if launch_date.weekday() == 4:
+        if now_brt.weekday() == 4:
             log.info("Sexta-feira — gerando relatório semanal...")
             week_events = get_week_events(service)
             weekly_logs = [p for e in week_events if (p := parse_event(e)) is not None
@@ -923,9 +894,9 @@ def main():
 
         # Relatório mensal — último dia útil do mês
         force_monthly = os.environ.get("FORCE_MONTHLY", "").strip().lower() == "true"
-        if is_last_working_day_of_month(launch_date) or force_monthly:
+        if is_last_working_day_of_month(now_brt) or force_monthly:
             log.info("Gerando relatório mensal...")
-            notify_monthly(domain, launch_date.year, launch_date.month)
+            notify_monthly(domain, now_brt.year, now_brt.month)
 
         save_health("ok", launched=len(launched))
 
