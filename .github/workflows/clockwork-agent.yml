@@ -1,9 +1,6 @@
 name: Clockwork Agent
 
 on:
-  schedule:
-    # Fallback a cada 30 minutos — caso o cron-job.org falhe
-    - cron: "0,30 * * * 1-5"
   workflow_dispatch:
   repository_dispatch:
     types: [clockwork]
