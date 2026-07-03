@@ -11,17 +11,18 @@ Ao final de cada execução, você recebe notificações no **Telegram** e no **
 ## Como funciona
 
 ```
-cron-job.org (nos horários configurados por você)
+cron-job.org (dois jobs nos horários que você escolher)
+  → job com event_type "reminder" → envia lembrete
+  → job com event_type "launch"   → lança worklogs + relatórios
   ↓
 GitHub Actions (repository_dispatch)
   ↓
 Verificação preventiva de tokens (Google + Jira)
   → alerta imediato se algum token estiver inválido
   ↓
-agent.py verifica a hora BRT e decide o modo:
-  → 18h00–18h59 → lembrete no Telegram/Google Chat
-  → 23h30–00h29 → lança worklogs + horas faltantes + relatórios
-  → outros horários → encerra silenciosamente
+agent.py executa o modo recebido:
+  → "reminder" → lembrete no Telegram/Google Chat
+  → "launch"   → lança worklogs + horas faltantes + relatórios
   ↓
 Jira API
   → verifica se já existe worklog (evita duplicar lançamentos manuais)
@@ -266,17 +267,16 @@ O **cron-job.org** é o serviço gratuito que dispara o workflow no horário exa
 
 1. Acesse [cron-job.org](https://cron-job.org) e crie uma conta gratuita
 
-**Criando o cron job de lembrete (18h):**
+**Criando o cron job de lembrete:**
 
 1. Clique em **Create cronjob**
 2. Preencha:
-   - **Title:** `Clockwork Agent — Lembrete`
+   - **Title:** `clockwork-agent-reminder`
    - **URL:** `https://api.github.com/repos/SEU_USUARIO/jira-clockwork-agent/dispatches`
-   - **Execution schedule:** clique em **Custom** e digite no campo Crontab:
+   - **Execution schedule:** clique em **Custom** e escolha o horário que preferir. Exemplo para 18h (fuso de Boa Vista/Brasília):
      ```
-     0 21 * * 1-5
+     0 18 * * 1-5
      ```
-     _(18h BRT = 21h UTC, segunda a sexta)_
 3. Clique na aba **ADVANCED** e configure:
    - **Request method:** `POST`
    - **Request headers:** clique em **Add header** e adicione:
@@ -284,21 +284,25 @@ O **cron-job.org** é o serviço gratuito que dispara o workflow no horário exa
      - `Content-Type` → `application/json`
    - **Request body:**
      ```json
-     { "event_type": "clockwork" }
+     { "event_type": "reminder" }
      ```
 4. Clique em **Create** para salvar
 
-**Criando o cron job de lançamento (23h30):**
+**Criando o cron job de lançamento:**
 
 Repita o processo acima com:
 
-- **Title:** `Clockwork Agent — Lançamento`
-- **Crontab expression:**
+- **Title:** `clockwork-agent-launch`
+- **Horário:** o que preferir. Exemplo para 23h30:
   ```
-  30 2 * * 2-6
+  30 23 * * 1-5
   ```
-  _(23h30 BRT = 02h30 UTC do dia seguinte, terça a sábado em UTC)_
-- Os demais campos são idênticos ao job de lembrete
+- **Request body:**
+  ```json
+  { "event_type": "launch" }
+  ```
+
+> ⚠️ O cron-job.org usa o fuso horário configurado na sua conta. Acesse **Settings → Timezone** e defina `America/Manaus` ou `America/Sao_Paulo` para usar horário BRT diretamente.
 
 **Verificando se está funcionando:**
 
@@ -309,12 +313,6 @@ No GitHub Actions, os runs disparados pelo cron-job.org aparecem como:
 ```
 Repository dispatch triggered by SEU_USUARIO
 ```
-
-> **Dica:** você pode ajustar os horários para o que preferir — o `agent.py` decide automaticamente o que fazer baseado na hora BRT:
->
-> - **18h00–18h59** → envia o lembrete
-> - **23h30–00h29** → lança os worklogs
-> - **outros horários** → encerra silenciosamente (sem fazer nada)
 
 ---
 
@@ -469,10 +467,7 @@ O GitHub Actions não garante execução no horário exato do cron — pode atra
 O GitHub Actions usa por padrão o `GITHUB_TOKEN` que não consegue fazer push em branches protegidas nem disparar workflows via API externa. O PAT é usado tanto para o agente commitar os arquivos de controle quanto para o cron-job.org disparar o workflow.
 
 **Posso mudar os horários do lembrete e do lançamento?**
-Sim! Basta ajustar os crons no cron-job.org. O `agent.py` aceita qualquer horário dentro das janelas:
-
-- **Lembrete:** qualquer horário entre 18h00 e 18h59 BRT
-- **Lançamento:** qualquer horário entre 23h30 e 00h29 BRT
+Sim! Basta ajustar os crons no cron-job.org para os horários que preferir. O agente executa o modo (`reminder` ou `launch`) no exato momento em que recebe o disparo — não há restrição de horário.
 
 ---
 
