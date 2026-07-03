@@ -2,12 +2,11 @@ name: Clockwork Agent
 
 on:
   schedule:
-    # Roda a cada 30 minutos — o agente decide o que fazer baseado na hora BRT:
-    # 18h00–18h59 BRT → lembrete
-    # 23h30–00h29 BRT → lançamento
-    # outros horários → encerra silenciosamente
+    # Fallback a cada 30 minutos — caso o cron-job.org falhe
     - cron: "0,30 * * * 1-5"
   workflow_dispatch:
+  repository_dispatch:
+    types: [clockwork]
 
 jobs:
   log-hours:
@@ -32,18 +31,18 @@ jobs:
 
       - name: Rodar agente
         env:
-          JIRA_DOMAIN:             ${{ secrets.JIRA_DOMAIN }}
-          JIRA_EMAIL:              ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN:          ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ secrets.JIRA_DOMAIN }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_CHAT_WEBHOOK:     ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
-          START_DATE:              ${{ secrets.START_DATE }}
-          LOOKBACK_DAYS:           ${{ secrets.LOOKBACK_DAYS }}
-          DAILY_HOURS_GOAL:        ${{ secrets.DAILY_HOURS_GOAL }}
-          FORCE_MODE:              ${{ secrets.FORCE_MODE }}
-          FORCE_MONTHLY:           ${{ secrets.FORCE_MONTHLY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_CHAT_WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          START_DATE: ${{ secrets.START_DATE }}
+          LOOKBACK_DAYS: ${{ secrets.LOOKBACK_DAYS }}
+          DAILY_HOURS_GOAL: ${{ secrets.DAILY_HOURS_GOAL }}
+          FORCE_MODE: ${{ secrets.FORCE_MODE }}
+          FORCE_MONTHLY: ${{ secrets.FORCE_MONTHLY }}
         run: python src/agent.py
 
       - name: Commitar arquivos de controle
