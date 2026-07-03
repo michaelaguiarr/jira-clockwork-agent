@@ -2,14 +2,11 @@ name: Clockwork Agent
 
 on:
   schedule:
-    # Teste temporário — 08h40 BRT (= 11h40 UTC)
-    - cron: "40 11 * * *"
-    # Teste — 09h30 BRT (= 12h30 UTC)
-    - cron: "30 12 * * *"
-    # 18h02 BRT (= 21h02 UTC) — lembrete para lançar eventos no Calendar
-    - cron: "2 21 * * 1-5"
-    # 23h32 BRT (= 02h32 UTC) — lança worklogs + verifica horas faltantes
-    - cron: "32 2 * * 2-6"
+    # Roda a cada 30 minutos — o agente decide o que fazer baseado na hora BRT:
+    # 18h00–18h59 BRT → lembrete
+    # 23h30–00h29 BRT → lançamento
+    # outros horários → encerra silenciosamente
+    - cron: "0,30 * * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -35,7 +32,6 @@ jobs:
 
       - name: Rodar agente
         env:
-          TZ: "America/Sao_Paulo" # <-- Força o fuso horário de Brasília na máquina
           JIRA_DOMAIN:             ${{ secrets.JIRA_DOMAIN }}
           JIRA_EMAIL:              ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN:          ${{ secrets.JIRA_API_TOKEN }}
