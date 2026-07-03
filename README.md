@@ -2,7 +2,7 @@
 
 Agente que lê automaticamente seus eventos do **Google Calendar** e lança os worklogs no **Jira** (sincronizado com o **Clockwork Pro**), sem você precisar fazer nada.
 
-Ao final de cada execução, você recebe notificações no **Telegram** e no **Google Chat** com o resumo do que foi lançado. Toda sexta-feira às 23h30 recebe o **relatório semanal**, e no último dia útil do mês o **relatório mensal** com meta x realizado.
+Ao final de cada execução, você recebe notificações no **Telegram** e no **Google Chat** com o resumo do que foi lançado. Toda sexta-feira recebe o **relatório semanal**, e no último dia útil do mês o **relatório mensal** com meta x realizado.
 
 > Criado para o time de Sustentação da RPE Processadora — mas funciona para qualquer equipe que use Jira + Clockwork Pro + Google Calendar.
 
@@ -11,26 +11,25 @@ Ao final de cada execução, você recebe notificações no **Telegram** e no **
 ## Como funciona
 
 ```
-GitHub Actions (18h e 23h30, seg–sex)
+cron-job.org (nos horários configurados por você)
+  ↓
+GitHub Actions (repository_dispatch)
   ↓
 Verificação preventiva de tokens (Google + Jira)
   → alerta imediato se algum token estiver inválido
   ↓
-18h → Lembrete no Telegram/Google Chat para lançar eventos no Calendar
+agent.py verifica a hora BRT e decide o modo:
+  → 18h00–18h59 → lembrete no Telegram/Google Chat
+  → 23h30–00h29 → lança worklogs + horas faltantes + relatórios
+  → outros horários → encerra silenciosamente
   ↓
-23h30 → Google Calendar API
-        → busca eventos do período configurado
-        → filtra os que têm PROJ-XXXX no título (SCG-1234, CARDS-567, etc.)
-      Jira API
-        → verifica se já existe worklog no ticket (evita duplicar lançamentos manuais)
-        → lança worklog com a duração exata do evento
-        → retry automático (até 3x) em caso de falha transitória
-      Telegram + Google Chat
-        → notificação diária com worklogs lançados e horas faltantes
-        → relatório semanal toda sexta às 20h
-        → relatório mensal no último dia útil do mês
-      logged_worklogs.json + health.json
-        → controle de eventos processados e status da última execução
+Jira API
+  → verifica se já existe worklog (evita duplicar lançamentos manuais)
+  → lança worklog com a duração exata do evento
+  → retry automático (até 3x) em caso de falha transitória
+  ↓
+logged_worklogs.json + health.json
+  → controle de eventos processados e status da última execução
 ```
 
 ---
@@ -56,7 +55,7 @@ O comentário do worklog no Jira será o título do evento **sem o prefixo `PROJ
 
 ## Notificações
 
-**Lembrete diário (18h):**
+**Lembrete (18h):**
 
 ```
 🔔 Lembrete — 02/07/2026
@@ -66,7 +65,7 @@ Exemplo: SCG-2098 - [JETCARD] Setup Noname
 ⏰ Os worklogs serão lançados automaticamente às 23h30.
 ```
 
-**Execução diária (23h30):**
+**Execução (23h30):**
 
 ```
 ⏱ Clockwork Agent — 02/07/2026 23:30
@@ -87,28 +86,24 @@ Exemplo: SCG-2098 - [JETCARD] Setup Noname
 🔑 Clockwork Agent — Token Jira Inválido
 
 O token de API do Jira está inválido ou foi revogado.
-
-Gere um novo em:
-id.atlassian.com → Security → API tokens
-
+Gere um novo em: id.atlassian.com → Security → API tokens
 Atualize o Secret JIRA_API_TOKEN no GitHub.
 ```
 
-**Relatório semanal (toda sexta às 23h30):**
+**Relatório semanal (toda sexta):**
 
 ```
 📊 Resumo semanal — 30/06 a 04/07
 
 ✅ SCG-2098  |  16h00
 ✅ SCG-1957  |  8h00
-✅ CARDS-567  |  16h00
 
-⏱ Total semana: 40h00
-📅 Dias com lançamento: 5 de 5
-🎯 Meta semanal atingida!
+⏱ Total semana: 24h00
+📅 Dias com lançamento: 3 de 5
+⚠️ Faltaram: 16h00 na semana
 ```
 
-**Relatório mensal (último dia útil do mês às 23h30):**
+**Relatório mensal (último dia útil do mês):**
 
 ```
 📅 Relatório Mensal — Julho/2026
@@ -222,13 +217,13 @@ cat google_token.json | pbcopy
 
 ### 7. Criar Personal Access Token (PAT) do GitHub
 
-O agente precisa de um PAT para commitar o `logged_worklogs.json` e `health.json` na branch `main` protegida.
+O agente precisa de um PAT para commitar o `logged_worklogs.json` e `health.json`, e também para o cron-job.org disparar o workflow.
 
 1. Acesse [github.com/settings/tokens](https://github.com/settings/tokens)
 2. Clique em **Generate new token (classic)**
 3. Dê um nome (ex: `clockwork-agent-push`)
 4. Expiration: **No expiration**
-5. Marque o escopo: ✅ **repo**
+5. Marque os escopos: ✅ **repo** e ✅ **workflow**
 6. Clique em **Generate token** e copie o token gerado
 
 > ⚠️ Guarde o token gerado — ele só é exibido uma vez.
@@ -252,26 +247,74 @@ No repositório: **Settings → Secrets and variables → Actions → New reposi
 | `START_DATE`              | Data de corte — eventos anteriores são ignorados    | `2026-07-01`                      |
 | `LOOKBACK_DAYS`           | Dias para trás na busca (usado se START_DATE vazio) | `7`                               |
 | `DAILY_HOURS_GOAL`        | Meta diária de horas                                | `8`                               |
-| `FORCE_MODE`              | `launch` para forçar lançamento fora do horário     | _(vazio)_                         |
+| `FORCE_MODE`              | `launch` ou `reminder` para forçar modo manualmente | _(vazio)_                         |
 | `FORCE_MONTHLY`           | `true` para forçar relatório mensal                 | _(vazio)_                         |
 
 > **Dica:** `START_DATE` deve ser o dia em que você começou a usar o agente, para evitar duplicar lançamentos manuais anteriores.
 
-> ⚠️ Sempre volte `FORCE_MODE` e `FORCE_MONTHLY` para vazio após os testes — eles são exclusivos para uso manual.
+> ⚠️ Sempre volte `FORCE_MODE` e `FORCE_MONTHLY` para vazio após os testes.
 
 ---
 
-### 9. Proteger a branch main (opcional)
+### 9. Configurar o cron-job.org
 
-Para impedir que colaboradores façam push direto na main:
+O **cron-job.org** é o serviço gratuito que dispara o workflow no horário exato, resolvendo o problema de atraso do GitHub Actions.
 
-1. Vá em **Settings → Branches → Add classic branch protection rule**
-2. **Branch name pattern:** `main`
-3. Marque ✅ **Require a pull request before merging**
-4. **Não marque** ❌ **Do not allow bypassing the above settings** — deixe desmarcado para você (admin) e o Actions continuarem com acesso
-5. Clique em **Create**
+> Por que não usar o cron nativo do GitHub Actions? O GitHub não garante execução no horário exato — pode atrasar horas em períodos de pico. O cron-job.org dispara o workflow via API do GitHub com precisão de segundos.
 
-> O `GH_PAT` configurado no passo anterior garante que o GitHub Actions consegue commitar mesmo com a branch protegida.
+**Criando a conta:**
+
+1. Acesse [cron-job.org](https://cron-job.org) e crie uma conta gratuita
+
+**Criando o cron job de lembrete (18h):**
+
+1. Clique em **Create cronjob**
+2. Preencha:
+   - **Title:** `Clockwork Agent — Lembrete`
+   - **URL:** `https://api.github.com/repos/SEU_USUARIO/jira-clockwork-agent/dispatches`
+   - **Execution schedule:** clique em **Custom** e digite no campo Crontab:
+     ```
+     0 21 * * 1-5
+     ```
+     _(18h BRT = 21h UTC, segunda a sexta)_
+3. Clique na aba **ADVANCED** e configure:
+   - **Request method:** `POST`
+   - **Request headers:** clique em **Add header** e adicione:
+     - `Authorization` → `Bearer SEU_GH_PAT`
+     - `Content-Type` → `application/json`
+   - **Request body:**
+     ```json
+     { "event_type": "clockwork" }
+     ```
+4. Clique em **Create** para salvar
+
+**Criando o cron job de lançamento (23h30):**
+
+Repita o processo acima com:
+
+- **Title:** `Clockwork Agent — Lançamento`
+- **Crontab expression:**
+  ```
+  30 2 * * 2-6
+  ```
+  _(23h30 BRT = 02h30 UTC do dia seguinte, terça a sábado em UTC)_
+- Os demais campos são idênticos ao job de lembrete
+
+**Verificando se está funcionando:**
+
+No histórico do cron-job.org, cada execução deve mostrar **Status: 204 No Content** — isso significa que o GitHub recebeu o disparo com sucesso.
+
+No GitHub Actions, os runs disparados pelo cron-job.org aparecem como:
+
+```
+Repository dispatch triggered by SEU_USUARIO
+```
+
+> **Dica:** você pode ajustar os horários para o que preferir — o `agent.py` decide automaticamente o que fazer baseado na hora BRT:
+>
+> - **18h00–18h59** → envia o lembrete
+> - **23h30–00h29** → lança os worklogs
+> - **outros horários** → encerra silenciosamente (sem fazer nada)
 
 ---
 
@@ -279,23 +322,25 @@ Para impedir que colaboradores façam push direto na main:
 
 No GitHub: **Actions → Clockwork Agent → Run workflow**
 
-Para testar o fluxo completo de lançamento fora do horário, defina `FORCE_MODE=launch` temporariamente e volte para vazio após o teste.
+Para forçar um modo específico fora do horário, defina temporariamente no Secret `FORCE_MODE`:
+
+- `launch` → força o lançamento de worklogs
+- `reminder` → força o envio do lembrete
 
 Exemplo de log esperado:
 
 ```
-=== Jira Clockwork Agent iniciado === (hora BRT: 23)
+=== Jira Clockwork Agent iniciado === (23:31 BRT)
+Modo: launch
 Verificando tokens...
 ✅ Token Google Calendar válido
 ✅ Token Jira válido — usuário: michael.aguiar
 Data de corte (START_DATE): 2026-07-01
-Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T20:00:00-03:00
+Buscando eventos de 2026-07-01T00:00:00-03:00 até 2026-07-02T23:31:00-03:00
 7 evento(s) encontrado(s) no período.
 3 evento(s) com ticket no título.
-⏭️  Já lançado pelo agente: SCG-2098 (abc12345)
-⚠️  Worklog já existe no Jira: SCG-1957 | 2026-07-01 | 5400s
 ✅ Worklog lançado: SCG-2050 | 3600s | 'Alinhamento time'
-Total lançado no Jira em 2026-07-02: 21600s (6h)
+Total lançado no Jira em 2026-07-02: 28800s (8h)
 Health check salvo: status=ok worklogs=1
 === Concluído: 1 worklog(s) lançado(s) ===
 ```
@@ -315,12 +360,12 @@ O agente tem **duas camadas** de proteção:
 
 ## Verificação preventiva de tokens
 
-No início de **cada execução** (18h e 23h30), o agente verifica se os tokens do Google e do Jira ainda são válidos — antes de tentar qualquer operação.
+No início de **cada execução**, o agente verifica se os tokens do Google e do Jira ainda são válidos — antes de tentar qualquer operação.
 
-| Token               | O que verifica                                     | Alerta enviado quando                                                          |
-| ------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
-| **Google Calendar** | Tenta renovar o `access_token` via `refresh_token` | O `refresh_token` foi revogado (ex: troca de senha, acesso removido no Google) |
-| **Jira API**        | Chama `GET /rest/api/3/myself`                     | Retorna 401 — token inválido ou revogado                                       |
+| Token               | O que verifica                                     | Alerta enviado quando                                                |
+| ------------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
+| **Google Calendar** | Tenta renovar o `access_token` via `refresh_token` | O `refresh_token` foi revogado (ex: troca de senha, acesso removido) |
+| **Jira API**        | Chama `GET /rest/api/3/myself`                     | Retorna 401 — token inválido ou revogado                             |
 
 Se qualquer token estiver inválido, o agente **para imediatamente**, envia um alerta no Telegram/Google Chat com instruções de correção e salva `status=error` no `health.json`.
 
@@ -347,8 +392,6 @@ Em caso de falha transitória na API do Jira (timeout, erro 5xx, rate limit), o 
 | 2ª falha  | 10 segundos |
 | 3ª falha  | 20 segundos |
 
-Erros do tipo 4xx (ticket não encontrado, sem permissão) não são retentados — são erros definitivos.
-
 ---
 
 ## Health Check
@@ -357,15 +400,14 @@ A cada execução o agente atualiza o arquivo `health.json` no repositório:
 
 ```json
 {
-  "last_run": "2026-07-02T20:00:41",
+  "last_run": "2026-07-02T23:31:00",
   "status": "ok",
   "worklogs_launched": 2,
   "error": ""
 }
 ```
 
-Para verificar o status, acesse o arquivo diretamente no GitHub:
-**Code → health.json**
+Para verificar o status, acesse o arquivo diretamente no GitHub: **Code → health.json**
 
 | Campo               | Descrição                            |
 | ------------------- | ------------------------------------ |
@@ -373,19 +415,6 @@ Para verificar o status, acesse o arquivo diretamente no GitHub:
 | `status`            | `ok` ou `error`                      |
 | `worklogs_launched` | Quantidade de worklogs lançados      |
 | `error`             | Mensagem de erro (vazio se ok)       |
-
----
-
-## Agendamento
-
-O agente roda automaticamente **de segunda a sexta**:
-
-| Execução   | Horário BRT | Horário UTC | O que faz                                                       |
-| ---------- | ----------- | ----------- | --------------------------------------------------------------- |
-| Lembrete   | 18:00       | 21:00       | Verifica tokens + notifica para lançar eventos no Calendar      |
-| Lançamento | 20:00       | 23:00       | Verifica tokens + lança worklogs + horas faltantes + relatórios |
-
-> ⚠️ Durante o **horário de verão** (outubro a fevereiro) o Brasil fica em UTC-2, então os horários passam a ser 19h e 00h30 BRT. Ajuste os crons para `"0 22 * * 1-5"` e `"30 3 * * 2-6"` se quiser manter os horários fixos.
 
 ---
 
@@ -422,10 +451,10 @@ O agente detecta que o evento sumiu do Calendar e cancela o worklog corresponden
 O controle usa o ID do evento. Se já foi lançado, não será relançado mesmo com horário diferente. Para relançar, remova o ID do `logged_worklogs.json`.
 
 **O token do Google expira?**
-O `refresh_token` não expira normalmente. Mas pode ser revogado se você trocar a senha do Google ou remover o acesso do app. Nesse caso, o agente detecta na verificação preventiva e avisa no Telegram com as instruções de correção.
+O `refresh_token` não expira normalmente. Mas pode ser revogado se você trocar a senha do Google ou remover o acesso do app. O agente detecta e avisa no Telegram com instruções de correção.
 
 **E se o Telegram ou Google Chat estiver fora?**
-A notificação falha silenciosamente — o agente continua funcionando e lança os worklogs normalmente. O erro aparece apenas no log do GitHub Actions.
+A notificação falha silenciosamente — o agente continua funcionando e lança os worklogs normalmente.
 
 **Como a meta mensal é calculada?**
 A meta considera apenas dias úteis do mês, excluindo finais de semana e feriados nacionais brasileiros (incluindo Carnaval, Sexta-feira Santa e Corpus Christi calculados automaticamente por ano).
@@ -433,8 +462,17 @@ A meta considera apenas dias úteis do mês, excluindo finais de semana e feriad
 **As horas faltantes consideram lançamentos manuais?**
 Sim! As horas faltantes são calculadas via JQL diretamente no Jira, buscando tudo que o usuário lançou no dia — independente de ser via agente, manual ou sem evento no Calendar.
 
+**Por que usar o cron-job.org em vez do cron nativo do GitHub Actions?**
+O GitHub Actions não garante execução no horário exato do cron — pode atrasar horas em períodos de pico. O cron-job.org dispara o workflow via API do GitHub com precisão de segundos, garantindo que o lembrete e o lançamento aconteçam nos horários configurados.
+
 **Por que preciso do GH_PAT?**
-O GitHub Actions usa por padrão o `GITHUB_TOKEN` que não consegue fazer push em branches protegidas. O PAT (Personal Access Token) é gerado com suas credenciais de admin, permitindo que o agente commite o `logged_worklogs.json` e `health.json` mesmo com a proteção ativa.
+O GitHub Actions usa por padrão o `GITHUB_TOKEN` que não consegue fazer push em branches protegidas nem disparar workflows via API externa. O PAT é usado tanto para o agente commitar os arquivos de controle quanto para o cron-job.org disparar o workflow.
+
+**Posso mudar os horários do lembrete e do lançamento?**
+Sim! Basta ajustar os crons no cron-job.org. O `agent.py` aceita qualquer horário dentro das janelas:
+
+- **Lembrete:** qualquer horário entre 18h00 e 18h59 BRT
+- **Lançamento:** qualquer horário entre 23h30 e 00h29 BRT
 
 ---
 
@@ -443,9 +481,8 @@ O GitHub Actions usa por padrão o `GITHUB_TOKEN` que não consegue fazer push e
 PRs são bem-vindos! Sugestões de melhoria:
 
 - Suporte a múltiplos calendários
-- Monitoramento externo do health check via VPS
+- Monitoramento externo do health check
 
 ---
 
 <p align="center">Feito com ☕ para automatizar o chato e focar no que importa.</p>
-.
