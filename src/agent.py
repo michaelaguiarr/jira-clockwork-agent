@@ -5,6 +5,8 @@ Roda via GitHub Actions a cada 30 minutos — o agente decide o que fazer basead
   - 18h00–18h59 BRT: lembrete para lançar eventos no Calendar
   - 23h30–00h29 BRT: lança worklogs + verifica horas faltantes + relatório semanal (sextas)
   - Outros horários: encerra silenciosamente
+
+⚠️ TEMPORÁRIO PARA TESTE: janela de lançamento ajustada para 09h20–10h20 BRT
 """
 
 import os
@@ -42,11 +44,12 @@ RETRY_DELAYS   = [5, 10, 20]
 
 # ── Janelas de execução BRT ────────────────────────────────────────────────────
 # Lembrete:   18h00 até 18h59
-# Lançamento: 23h30 até 00h29 (passa da meia-noite)
-REMINDER_START  = (18, 0)
-REMINDER_END    = (18, 59)
-LAUNCH_START    = (23, 30)
-LAUNCH_END_NEXT = (0, 29)   # minutos após meia-noite
+# Lançamento: 09h20–10h20 (TEMPORÁRIO PARA TESTE)
+# Produção:   LAUNCH_START = (23, 30) / LAUNCH_END = (0, 29)
+REMINDER_START = (18, 0)
+REMINDER_END   = (18, 59)
+LAUNCH_START   = (9, 20)
+LAUNCH_END     = (10, 20)
 
 
 def get_execution_mode(now_brt: datetime, force_mode: str) -> str:
@@ -59,19 +62,18 @@ def get_execution_mode(now_brt: datetime, force_mode: str) -> str:
     if force_mode == "launch":
         return "launch"
 
-    h, m = now_brt.hour, now_brt.minute
+    h, m  = now_brt.hour, now_brt.minute
     total = h * 60 + m
 
     reminder_start = REMINDER_START[0] * 60 + REMINDER_START[1]
     reminder_end   = REMINDER_END[0]   * 60 + REMINDER_END[1]
     launch_start   = LAUNCH_START[0]   * 60 + LAUNCH_START[1]
-    launch_end     = LAUNCH_END_NEXT[0] * 60 + LAUNCH_END_NEXT[1]  # minutos após meia-noite = 29
+    launch_end     = LAUNCH_END[0]     * 60 + LAUNCH_END[1]
 
     if reminder_start <= total <= reminder_end:
         return "reminder"
 
-    # Lançamento: 23h30–23h59 ou 00h00–00h29
-    if total >= launch_start or total <= launch_end:
+    if launch_start <= total <= launch_end:
         return "launch"
 
     return "skip"
@@ -801,7 +803,7 @@ def main():
     log.info("Modo: %s", mode)
 
     if mode == "skip":
-        log.info("Fora da janela de execução (18h ou 23h30) — encerrando.")
+        log.info("Fora da janela de execução — encerrando.")
         return
 
     # ── Constrói serviço Google Calendar ─────────────────────────────────────
@@ -830,13 +832,9 @@ def main():
         save_health("ok")
         return
 
-    # ── Modo lançamento (23h30) ───────────────────────────────────────────────
+    # ── Modo lançamento ───────────────────────────────────────────────────────
     try:
-        # Para o lançamento, usar a data de ontem se for após meia-noite
         launch_date = now_brt
-        if now_brt.hour == 0:
-            launch_date = now_brt - timedelta(days=1)
-            log.info("Após meia-noite — usando data de ontem: %s", launch_date.date())
 
         events            = get_recent_events(service)
         log.info("%d evento(s) encontrado(s) no período.", len(events))
@@ -900,7 +898,6 @@ def main():
 
         save_logged(new_logged)
 
-        # Horas faltantes via JQL — usa data de ontem se após meia-noite
         today_str     = launch_date.date().isoformat()
         total_today_s = get_jira_worklogs_by_date(domain, today_str)
         missing_s     = max(0, DAILY_GOAL_S - total_today_s)
@@ -914,7 +911,6 @@ def main():
                 + "\n\nOs eventos foram removidos do Calendar e os worklogs foram deletados no Jira."
             )
 
-        # Relatório semanal — toda sexta-feira
         if launch_date.weekday() == 4:
             log.info("Sexta-feira — gerando relatório semanal...")
             week_events = get_week_events(service)
@@ -922,7 +918,6 @@ def main():
                            and e["id"] in new_logged]
             notify_weekly(weekly_logs)
 
-        # Relatório mensal — último dia útil do mês
         force_monthly = os.environ.get("FORCE_MONTHLY", "").strip().lower() == "true"
         if is_last_working_day_of_month(launch_date) or force_monthly:
             log.info("Gerando relatório mensal...")
