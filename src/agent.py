@@ -597,6 +597,20 @@ def parse_event(event: dict) -> dict | None:
     if not match:
         return None
 
+    # Verifica se o usuário participou do evento
+    # accepted = confirmou | needsAction = criou o evento (não precisa confirmar)
+    # declined = recusou → ignora
+    # tentative = talvez → ignora
+    attendees = event.get("attendees", [])
+    if attendees:
+        self_status = next(
+            (a.get("responseStatus") for a in attendees if a.get("self")),
+            "needsAction"
+        )
+        if self_status not in ("accepted", "needsAction"):
+            log.debug("Evento '%s' ignorado: status de resposta '%s'", title, self_status)
+            return None
+
     issue_key = match.group(1).upper()
     start_raw = event.get("start", {})
     end_raw   = event.get("end", {})
@@ -625,7 +639,12 @@ def parse_event(event: dict) -> dict | None:
     }
 
 
-def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int) -> bool:
+def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int, started_jira: str) -> bool:
+    """
+    Verifica se já existe worklog no Jira para o ticket naquele dia.
+    Compara data + duração (±5min) + horário de início (±5min) para evitar
+    falsos positivos em eventos do mesmo ticket com mesma duração no mesmo dia.
+    """
     url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
         resp = requests_with_retry(
@@ -635,12 +654,35 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
         )
         if resp.status_code != 200:
             return False
+
+        # Converte o horário de início do evento para comparação
+        try:
+            event_start = datetime.fromisoformat(started_jira.replace("+0000", "+00:00"))
+        except Exception:
+            event_start = None
+
         for wl in resp.json().get("worklogs", []):
             wl_date     = wl.get("started", "")[:10]
             wl_duration = wl.get("timeSpentSeconds", 0)
-            if wl_date == date and abs(wl_duration - duration_seconds) <= TOLERANCE_S:
-                log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
-                return True
+
+            if wl_date != date:
+                continue
+            if abs(wl_duration - duration_seconds) > TOLERANCE_S:
+                continue
+
+            # Se durações batem, verifica horário de início
+            if event_start:
+                try:
+                    wl_start = datetime.fromisoformat(wl.get("started", "").replace("+0000", "+00:00"))
+                    diff_start = abs((wl_start - event_start).total_seconds())
+                    if diff_start > TOLERANCE_S:
+                        continue  # mesmo ticket/dia/duração mas horário diferente → não é duplicata
+                except Exception:
+                    pass  # se não conseguir comparar horário, usa só data+duração
+
+            log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
+            return True
+
     except Exception as e:
         log.warning("Erro ao verificar worklogs em %s: %s", issue_key, e)
     return False
@@ -835,7 +877,7 @@ def main():
                 log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
                 continue
 
-            if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"]):
+            if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"], parsed["started_jira"]):
                 log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
                 skipped.append(parsed)
                 new_logged[eid] = None
