@@ -39,14 +39,11 @@ DAILY_GOAL_S   = int(os.environ.get("DAILY_HOURS_GOAL", "8")) * 3600
 MAX_RETRIES    = 3
 RETRY_DELAYS   = [5, 10, 20]
 
+# Escopo de leitura + escrita no Calendar (necessário para marcar eventos com ✅)
+CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
 
 def get_execution_mode() -> str:
-    """
-    Determina o modo de execução:
-    1. FORCE_MODE (Secret do GitHub) — para testes manuais
-    2. EVENT_TYPE (passado pelo workflow via repository_dispatch)
-    3. workflow_dispatch sem event_type → launch por padrão
-    """
     force_mode = os.environ.get("FORCE_MODE", "").strip().lower()
     if force_mode in ("reminder", "launch"):
         return force_mode
@@ -55,7 +52,6 @@ def get_execution_mode() -> str:
     if event_type in ("reminder", "launch"):
         return event_type
 
-    # workflow_dispatch manual sem FORCE_MODE → launch por padrão
     return "launch"
 
 
@@ -239,9 +235,12 @@ def notify_reminder():
     )
 
 
-def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], missing_seconds: int):
-    now_brt = datetime.now(BRT).strftime("%d/%m/%Y %H:%M")
-    lines   = [f"⏱ <b>Clockwork Agent</b> — {now_brt}\n"]
+def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict],
+                 missing_seconds: int, total_month_s: int, working_days: int):
+    now_brt   = datetime.now(BRT)
+    month_goal_s = working_days * DAILY_GOAL_S
+
+    lines = [f"⏱ <b>Clockwork Agent</b> — {now_brt.strftime('%d/%m/%Y %H:%M')}\n"]
 
     if launched:
         lines.append("✅ <b>Lançados:</b>")
@@ -268,9 +267,22 @@ def notify_daily(launched: list[dict], skipped: list[dict], errors: list[dict], 
         lines.append(f"\n⏱ <b>Total lançado hoje:</b> {format_seconds(total_s)}")
 
     if missing_seconds > 0:
-        lines.append(f"\n⚠️ <b>Horas faltantes:</b> {format_seconds(missing_seconds)} para atingir a meta de {format_seconds(DAILY_GOAL_S)}")
+        lines.append(f"⚠️ <b>Horas faltantes hoje:</b> {format_seconds(missing_seconds)} para atingir a meta de {format_seconds(DAILY_GOAL_S)}")
     else:
-        lines.append(f"\n🎯 <b>Meta diária atingida!</b> {format_seconds(DAILY_GOAL_S)} lançadas.")
+        lines.append(f"🎯 <b>Meta diária atingida!</b> {format_seconds(DAILY_GOAL_S)} lançadas.")
+
+    # Total do mês
+    month_name = [
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ][now_brt.month - 1]
+    diff_s    = total_month_s - month_goal_s
+    diff_sign = "+" if diff_s >= 0 else ""
+    lines.append(
+        f"\n📅 <b>{month_name}:</b> {format_seconds(total_month_s)} de {format_seconds(month_goal_s)} "
+        f"({working_days} dias úteis × {format_seconds(DAILY_GOAL_S)})  "
+        f"<b>{diff_sign}{format_seconds(abs(diff_s))}</b> {'🎯' if diff_s >= 0 else '⚠️'}"
+    )
 
     send_telegram("\n".join(lines))
 
@@ -423,6 +435,63 @@ def get_jira_worklogs_by_date(domain: str, date: str) -> int:
     return total_s
 
 
+def get_jira_worklogs_month(domain: str, year: int, month: int) -> int:
+    """Retorna total de segundos lançados pelo usuário no mês via JQL."""
+    _, last_d  = calendar.monthrange(year, month)
+    date_start = f"{year}-{month:02d}-01"
+    date_end   = f"{year}-{month:02d}-{last_d:02d}"
+
+    jql        = f'worklogAuthor = currentUser() AND worklogDate >= "{date_start}" AND worklogDate <= "{date_end}"'
+    search_url = f"https://{domain}/rest/api/3/search/jql"
+    issue_keys = []
+    start_at   = 0
+
+    while True:
+        try:
+            resp = requests_with_retry(
+                "GET", search_url,
+                headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+                params={"jql": jql, "fields": "summary", "startAt": start_at, "maxResults": 50},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                break
+            data   = resp.json()
+            issues = data.get("issues", [])
+            issue_keys.extend(i["key"] for i in issues)
+            if start_at + len(issues) >= data.get("total", 0):
+                break
+            start_at += len(issues)
+        except Exception as e:
+            log.warning("Erro JQL mês: %s", e)
+            break
+
+    month_str = f"{year}-{month:02d}"
+    total_s   = 0
+    email     = os.environ["JIRA_EMAIL"]
+
+    for issue_key in issue_keys:
+        url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
+        try:
+            resp = requests_with_retry(
+                "GET", url,
+                headers={"Authorization": jira_auth_header(), "Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            for wl in resp.json().get("worklogs", []):
+                author_email = wl.get("author", {}).get("emailAddress", "")
+                if (wl.get("started", "").startswith(month_str)
+                        and author_email.lower() == email.lower()):
+                    total_s += wl.get("timeSpentSeconds", 0)
+        except Exception as e:
+            log.warning("Erro ao buscar worklogs de %s: %s", issue_key, e)
+
+    log.info("Total lançado no mês %s/%s: %ds (%s)", month, year, total_s, format_seconds(total_s))
+    return total_s
+
+
 def get_monthly_worklogs(domain: str, year: int, month: int) -> list[dict]:
     _, last_d  = calendar.monthrange(year, month)
     date_start = f"{year}-{month:02d}-01"
@@ -534,7 +603,7 @@ def build_calendar_service():
         token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
         client_id=token_data["client_id"],
         client_secret=token_data["client_secret"],
-        scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+        scopes=CALENDAR_SCOPES,
     )
 
     if creds.expired or not creds.token:
@@ -591,25 +660,35 @@ def get_week_events(service) -> list[dict]:
     return result.get("items", [])
 
 
+def mark_event_done(service, event: dict) -> bool:
+    """Adiciona ✅ no início do título do evento no Calendar."""
+    title = event.get("summary", "")
+    if title.startswith("✅"):
+        return True  # já marcado
+
+    new_title = f"✅ {title}"
+    try:
+        service.events().patch(
+            calendarId="primary",
+            eventId=event["id"],
+            body={"summary": new_title},
+        ).execute()
+        log.info("✅ Evento marcado no Calendar: %s", new_title)
+        return True
+    except Exception as e:
+        log.warning("Erro ao marcar evento no Calendar: %s", e)
+        return False
+
+
 def parse_event(event: dict) -> dict | None:
     title = event.get("summary", "")
-    match = TICKET_PATTERN.search(title)
+
+    # Ignora eventos já marcados com ✅
+    clean_title = title.lstrip("✅ ").strip()
+
+    match = TICKET_PATTERN.search(clean_title)
     if not match:
         return None
-
-    # Verifica se o usuário participou do evento
-    # accepted = confirmou | needsAction = criou o evento (não precisa confirmar)
-    # declined = recusou → ignora
-    # tentative = talvez → ignora
-    attendees = event.get("attendees", [])
-    if attendees:
-        self_status = next(
-            (a.get("responseStatus") for a in attendees if a.get("self")),
-            "needsAction"
-        )
-        if self_status not in ("accepted", "needsAction"):
-            log.debug("Evento '%s' ignorado: status de resposta '%s'", title, self_status)
-            return None
 
     issue_key = match.group(1).upper()
     start_raw = event.get("start", {})
@@ -625,12 +704,13 @@ def parse_event(event: dict) -> dict | None:
     if duration_seconds <= 0:
         return None
 
-    comment = re.sub(r"^[A-Z]+-\d+\s*[-–]\s*", "", title).strip() or title
+    comment = re.sub(r"^[A-Z]+-\d+\s*[-–]\s*", "", clean_title).strip() or clean_title
 
     return {
         "event_id":         event["id"],
+        "event_raw":        event,
         "issue_key":        issue_key,
-        "title":            title,
+        "title":            clean_title,
         "comment":          comment,
         "start":            start_dt.isoformat(),
         "date":             start_dt.astimezone(BRT).date().isoformat(),
@@ -639,13 +719,13 @@ def parse_event(event: dict) -> dict | None:
     }
 
 
-def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seconds: int, started_jira: str) -> bool:
+def already_logged_in_jira(domain: str, issue_key: str, started_jira: str, duration_seconds: int) -> bool:
     """
-    Verifica se já existe worklog no Jira para o ticket naquele dia.
-    Compara data + duração (±5min) + horário de início (±5min) para evitar
-    falsos positivos em eventos do mesmo ticket com mesma duração no mesmo dia.
+    Verifica se já existe worklog no Jira para o ticket com mesmo horário de início e duração parecida.
+    Usa o horário exato de início (started_jira) para diferenciar múltiplos eventos do mesmo ticket no mesmo dia.
     """
-    url = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
+    date = started_jira[:10]
+    url  = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
     try:
         resp = requests_with_retry(
             "GET", url,
@@ -654,15 +734,9 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
         )
         if resp.status_code != 200:
             return False
-
-        # Converte o horário de início do evento para comparação
-        try:
-            event_start = datetime.fromisoformat(started_jira.replace("+0000", "+00:00"))
-        except Exception:
-            event_start = None
-
         for wl in resp.json().get("worklogs", []):
-            wl_date     = wl.get("started", "")[:10]
+            wl_started  = wl.get("started", "")
+            wl_date     = wl_started[:10]
             wl_duration = wl.get("timeSpentSeconds", 0)
 
             if wl_date != date:
@@ -670,18 +744,19 @@ def already_logged_in_jira(domain: str, issue_key: str, date: str, duration_seco
             if abs(wl_duration - duration_seconds) > TOLERANCE_S:
                 continue
 
-            # Se durações batem, verifica horário de início
-            if event_start:
-                try:
-                    wl_start = datetime.fromisoformat(wl.get("started", "").replace("+0000", "+00:00"))
-                    diff_start = abs((wl_start - event_start).total_seconds())
-                    if diff_start > TOLERANCE_S:
-                        continue  # mesmo ticket/dia/duração mas horário diferente → não é duplicata
-                except Exception:
-                    pass  # se não conseguir comparar horário, usa só data+duração
-
-            log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
-            return True
+            # Compara horário de início com tolerância de 5 minutos
+            try:
+                wl_dt      = datetime.fromisoformat(wl_started.replace("+0000", "+00:00"))
+                parsed_dt  = datetime.fromisoformat(started_jira.replace("+0000", "+00:00"))
+                diff_start = abs((wl_dt - parsed_dt).total_seconds())
+                if diff_start <= TOLERANCE_S:
+                    log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds | inicio=%s",
+                             issue_key, wl_date, wl_duration, wl_started)
+                    return True
+            except Exception:
+                # Se não conseguir comparar o horário, cai na comparação só por duração
+                log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
+                return True
 
     except Exception as e:
         log.warning("Erro ao verificar worklogs em %s: %s", issue_key, e)
@@ -819,11 +894,9 @@ def main():
 
     log.info("=== Jira Clockwork Agent iniciado === (%s BRT)", now_brt.strftime("%H:%M"))
 
-    # ── Determina modo de execução ────────────────────────────────────────────
     mode = get_execution_mode()
     log.info("Modo: %s", mode)
 
-    # ── Constrói serviço Google Calendar ─────────────────────────────────────
     try:
         service, creds = build_calendar_service()
     except Exception as e:
@@ -833,7 +906,6 @@ def main():
         save_health("error", error=str(e))
         raise
 
-    # ── Verificação preventiva de tokens ─────────────────────────────────────
     log.info("Verificando tokens...")
     google_ok = check_google_token(creds)
     jira_ok   = check_jira_token(domain)
@@ -842,14 +914,12 @@ def main():
         save_health("error", error="Token inválido detectado na verificação preventiva")
         return
 
-    # ── Modo lembrete ─────────────────────────────────────────────────────────
     if mode == "reminder":
         log.info("Enviando lembrete...")
         notify_reminder()
         save_health("ok")
         return
 
-    # ── Modo lançamento ───────────────────────────────────────────────────────
     try:
         events            = get_recent_events(service)
         log.info("%d evento(s) encontrado(s) no período.", len(events))
@@ -877,10 +947,12 @@ def main():
                 log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
                 continue
 
-            if already_logged_in_jira(domain, parsed["issue_key"], parsed["date"], parsed["duration_seconds"], parsed["started_jira"]):
+            if already_logged_in_jira(domain, parsed["issue_key"], parsed["started_jira"], parsed["duration_seconds"]):
                 log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
                 skipped.append(parsed)
                 new_logged[eid] = None
+                # Marca evento no Calendar mesmo para lançamentos manuais
+                mark_event_done(service, parsed["event_raw"])
                 continue
 
             success, error_type = log_worklog(domain, parsed)
@@ -897,6 +969,9 @@ def main():
 
                 new_logged[eid] = wl_id
                 launched.append(parsed)
+
+                # Marca evento no Calendar com ✅
+                mark_event_done(service, parsed["event_raw"])
             else:
                 error_messages = {
                     "ticket_not_found": f"Ticket {parsed['issue_key']} não encontrado no Jira — verifique o título do evento",
@@ -913,11 +988,16 @@ def main():
 
         save_logged(new_logged)
 
+        # Horas do dia via JQL
         today_str     = now_brt.date().isoformat()
         total_today_s = get_jira_worklogs_by_date(domain, today_str)
         missing_s     = max(0, DAILY_GOAL_S - total_today_s)
 
-        notify_daily(launched, skipped, errors, missing_s)
+        # Total e meta do mês
+        working_days   = count_working_days(now_brt.year, now_brt.month)
+        total_month_s  = get_jira_worklogs_month(domain, now_brt.year, now_brt.month)
+
+        notify_daily(launched, skipped, errors, missing_s, total_month_s, working_days)
 
         if cancelled:
             send_telegram(
@@ -926,7 +1006,6 @@ def main():
                 + "\n\nOs eventos foram removidos do Calendar e os worklogs foram deletados no Jira."
             )
 
-        # Relatório semanal — toda sexta-feira
         if now_brt.weekday() == 4:
             log.info("Sexta-feira — gerando relatório semanal...")
             week_events = get_week_events(service)
@@ -934,7 +1013,6 @@ def main():
                            and e["id"] in new_logged]
             notify_weekly(weekly_logs)
 
-        # Relatório mensal — último dia útil do mês
         force_monthly = os.environ.get("FORCE_MONTHLY", "").strip().lower() == "true"
         if is_last_working_day_of_month(now_brt) or force_monthly:
             log.info("Gerando relatório mensal...")
