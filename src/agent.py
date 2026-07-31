@@ -699,6 +699,29 @@ def mark_event_done(service, event: dict) -> bool:
         return False
 
 
+def _attendance_confirmed(event: dict) -> bool:
+    """
+    Só lança horas se o usuário confirmou presença (RSVP = "Sim").
+    Eventos onde ele é o organizador não exigem RSVP (não há convite a
+    responder). Eventos sem lista de attendees (compromissos pessoais,
+    sem convidados) também são tratados como confirmados.
+    """
+    organizer = event.get("organizer", {})
+    if organizer.get("self"):
+        return True
+
+    attendees = event.get("attendees", [])
+    if not attendees:
+        return True
+
+    for attendee in attendees:
+        if attendee.get("self"):
+            return attendee.get("responseStatus") == "accepted"
+
+    # Tem lista de convidados mas o usuário não está nela (raro) — não bloqueia.
+    return True
+
+
 def parse_event(event: dict) -> dict | None:
     title = event.get("summary", "")
 
@@ -710,6 +733,11 @@ def parse_event(event: dict) -> dict | None:
         return None
 
     issue_key = match.group(1).upper()
+
+    if not _attendance_confirmed(event):
+        log.info("⏭️  Presença não confirmada (RSVP): %s | %s", issue_key, clean_title)
+        return None
+
     start_raw = event.get("start", {})
     end_raw   = event.get("end", {})
 
