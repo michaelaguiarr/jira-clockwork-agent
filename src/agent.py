@@ -612,6 +612,41 @@ def build_calendar_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False), creds
 
 
+def _list_all_events(service, time_min: str, time_max: str) -> list[dict]:
+    """
+    Busca TODOS os eventos no intervalo, seguindo a paginação da API do
+    Google Calendar (que limita a 250 resultados por página por padrão).
+    Sem isso, janelas com muitos eventos perdem silenciosamente os mais
+    recentes (a API ordena por startTime crescente e corta na 1ª página).
+    """
+    items: list[dict] = []
+    page_token = None
+    page_count = 0
+
+    while True:
+        result = service.events().list(
+            calendarId="primary",
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=250,
+            pageToken=page_token,
+        ).execute()
+
+        items.extend(result.get("items", []))
+        page_count += 1
+        page_token = result.get("nextPageToken")
+
+        if not page_token:
+            break
+
+    if page_count > 1:
+        log.info("Busca paginada: %d página(s) percorridas, %d evento(s) no total.", page_count, len(items))
+
+    return items
+
+
 def get_recent_events(service) -> list[dict]:
     now_brt        = datetime.now(BRT)
     start_date_env = os.environ.get("START_DATE", "").strip()
@@ -632,15 +667,7 @@ def get_recent_events(service) -> list[dict]:
     time_max = now_brt.isoformat()
     log.info("Buscando eventos de %s até %s", time_min, time_max)
 
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=time_min,
-        timeMax=time_max,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-
-    return result.get("items", [])
+    return _list_all_events(service, time_min, time_max)
 
 
 def get_week_events(service) -> list[dict]:
@@ -649,15 +676,7 @@ def get_week_events(service) -> list[dict]:
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=monday.isoformat(),
-        timeMax=now_brt.isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-
-    return result.get("items", [])
+    return _list_all_events(service, monday.isoformat(), now_brt.isoformat())
 
 
 def mark_event_done(service, event: dict) -> bool:
