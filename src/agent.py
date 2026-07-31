@@ -719,10 +719,11 @@ def parse_event(event: dict) -> dict | None:
     }
 
 
-def already_logged_in_jira(domain: str, issue_key: str, started_jira: str, duration_seconds: int) -> bool:
+def already_logged_in_jira(domain: str, issue_key: str, started_jira: str, duration_seconds: int):
     """
     Verifica se já existe worklog no Jira para o ticket com mesmo horário de início e duração parecida.
     Usa o horário exato de início (started_jira) para diferenciar múltiplos eventos do mesmo ticket no mesmo dia.
+    Retorna (encontrado: bool, worklog_id: str|None, comentario_atual: str|None)
     """
     date = started_jira[:10]
     url  = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog"
@@ -733,7 +734,7 @@ def already_logged_in_jira(domain: str, issue_key: str, started_jira: str, durat
             timeout=15,
         )
         if resp.status_code != 200:
-            return False
+            return False, None, None
         for wl in resp.json().get("worklogs", []):
             wl_started  = wl.get("started", "")
             wl_date     = wl_started[:10]
@@ -744,23 +745,36 @@ def already_logged_in_jira(domain: str, issue_key: str, started_jira: str, durat
             if abs(wl_duration - duration_seconds) > TOLERANCE_S:
                 continue
 
+            def extract_comment_text(comment_field) -> str:
+                try:
+                    content = comment_field.get("content", [])
+                    parts = []
+                    for block in content:
+                        for inline in block.get("content", []):
+                            if inline.get("type") == "text":
+                                parts.append(inline.get("text", ""))
+                    return " ".join(parts).strip()
+                except Exception:
+                    return ""
+
             # Compara horário de início com tolerância de 5 minutos
             try:
                 wl_dt      = datetime.fromisoformat(wl_started.replace("+0000", "+00:00"))
                 parsed_dt  = datetime.fromisoformat(started_jira.replace("+0000", "+00:00"))
                 diff_start = abs((wl_dt - parsed_dt).total_seconds())
                 if diff_start <= TOLERANCE_S:
-                    log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds | inicio=%s",
-                             issue_key, wl_date, wl_duration, wl_started)
-                    return True
+                    log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds | inicio=%s | id=%s",
+                             issue_key, wl_date, wl_duration, wl_started, wl.get("id"))
+                    return True, wl.get("id"), extract_comment_text(wl.get("comment", {}))
             except Exception:
                 # Se não conseguir comparar o horário, cai na comparação só por duração
-                log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds", issue_key, wl_date, wl_duration)
-                return True
+                log.info("⚠️  Worklog já existe no Jira: %s | %s | %ds | id=%s",
+                         issue_key, wl_date, wl_duration, wl.get("id"))
+                return True, wl.get("id"), extract_comment_text(wl.get("comment", {}))
 
     except Exception as e:
         log.warning("Erro ao verificar worklogs em %s: %s", issue_key, e)
-    return False
+    return False, None, None
 
 
 def get_jira_worklogs_today(domain: str, issue_key: str, today: str) -> list[dict]:
@@ -841,6 +855,37 @@ def log_worklog(domain: str, parsed: dict):
         log.error("❌ Falha ao lançar worklog em %s: %s %s",
                   parsed["issue_key"], resp.status_code, resp.text)
         return False, "api_error"
+
+
+def update_worklog_comment(domain: str, issue_key: str, worklog_id: str, new_comment: str) -> bool:
+    """Atualiza o comentário de um worklog já existente no Jira."""
+    url  = f"https://{domain}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
+    body = {
+        "comment": {
+            "type": "doc",
+            "version": 1,
+            "content": [{
+                "type": "paragraph",
+                "content": [{"type": "text", "text": new_comment}],
+            }],
+        },
+    }
+    resp = requests_with_retry(
+        "PUT", url,
+        headers={
+            "Authorization": jira_auth_header(),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json=body,
+        timeout=15,
+    )
+    if resp.status_code == 200:
+        log.info("📝 Comentário do worklog atualizado: %s | id=%s | '%s'", issue_key, worklog_id, new_comment)
+        return True
+    else:
+        log.warning("❌ Falha ao atualizar comentário do worklog %s/%s: %s", issue_key, worklog_id, resp.status_code)
+        return False
 
 
 # ── Controle de duplicatas ─────────────────────────────────────────────────────
@@ -947,10 +992,21 @@ def main():
                 log.info("⏭️  Já lançado pelo agente: %s (%s)", parsed["issue_key"], eid[:8])
                 continue
 
-            if already_logged_in_jira(domain, parsed["issue_key"], parsed["started_jira"], parsed["duration_seconds"]):
+            found, wl_id, current_comment = already_logged_in_jira(
+                domain, parsed["issue_key"], parsed["started_jira"], parsed["duration_seconds"]
+            )
+            if found:
                 log.info("⏭️  Worklog manual detectado: %s | %s", parsed["issue_key"], parsed["date"])
                 skipped.append(parsed)
-                new_logged[eid] = None
+                new_logged[eid] = f"{parsed['issue_key']}:{wl_id}" if wl_id else None
+
+                # Atualiza o comentário se estiver genérico/vazio ou diferente do evento
+                if wl_id and current_comment != parsed["comment"]:
+                    generic_markers = ("apontamento de horas", "sustentação", "")
+                    is_generic = current_comment.strip().lower().startswith(generic_markers) or not current_comment.strip()
+                    if is_generic:
+                        update_worklog_comment(domain, parsed["issue_key"], wl_id, parsed["comment"])
+
                 # Marca evento no Calendar mesmo para lançamentos manuais
                 mark_event_done(service, parsed["event_raw"])
                 continue
